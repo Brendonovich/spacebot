@@ -205,7 +205,14 @@ impl Tool for MemorySaveTool {
             let association =
                 Association::new(&memory.id, &assoc.target_id, relation_type).with_weight(assoc.weight);
 
-            let _ = store.create_association(&association).await;
+            if let Err(error) = store.create_association(&association).await {
+                tracing::warn!(
+                    memory_id = %memory.id,
+                    target_id = %assoc.target_id,
+                    %error,
+                    "failed to create memory association"
+                );
+            }
         }
 
         // Generate and store embedding (async to avoid blocking the tokio runtime)

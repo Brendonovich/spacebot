@@ -52,11 +52,7 @@ impl EmbeddingModel {
     }
 }
 
-impl Default for EmbeddingModel {
-    fn default() -> Self {
-        Self::new(Path::new(".fastembed_cache")).expect("failed to initialize embedding model")
-    }
-}
+
 
 /// Async function to embed text using a shared model.
 pub async fn embed_text(model: &Arc<EmbeddingModel>, text: &str) -> Result<Vec<f32>> {

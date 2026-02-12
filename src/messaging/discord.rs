@@ -426,7 +426,12 @@ impl EventHandler for Handler {
             metadata,
         };
 
-        self.inbound_tx.send(inbound).await.ok();
+        if let Err(error) = self.inbound_tx.send(inbound).await {
+            tracing::warn!(
+                %error,
+                "failed to send inbound message from Discord (receiver dropped)"
+            );
+        }
     }
 }
 

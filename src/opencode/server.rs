@@ -4,13 +4,17 @@
 //! Each server is spawned as `opencode serve --port <port>` and communicated
 //! with via its HTTP API. Servers are reused across worker tasks targeting
 //! the same directory.
+//!
+//! Port mappings are persisted to disk so that after a spacebot restart, we can
+//! reattach to OpenCode servers that are still running from the previous session.
 
 use crate::opencode::types::*;
 
 use anyhow::{Context as _, bail};
 use reqwest::Client;
 use std::collections::HashMap;
-use std::net::TcpListener;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -28,6 +32,7 @@ const MAX_RESTART_RETRIES: u32 = 5;
 pub struct OpenCodeServer {
     directory: PathBuf,
     port: u16,
+    /// None for reattached servers (process was spawned by a previous spacebot run).
     process: Option<Child>,
     base_url: String,
     client: Client,
@@ -38,12 +43,14 @@ pub struct OpenCodeServer {
 
 impl OpenCodeServer {
     /// Spawn a new OpenCode server for the given directory.
+    /// Uses a deterministic port derived from the directory path so that
+    /// servers can be rediscovered after a spacebot restart.
     pub async fn spawn(
         directory: PathBuf,
         opencode_path: &str,
         permissions: &OpenCodePermissions,
     ) -> anyhow::Result<Self> {
-        let port = find_free_port()?;
+        let port = port_for_directory(&directory);
         let base_url = format!("http://127.0.0.1:{port}");
 
         let env_config = OpenCodeEnvConfig::new(permissions);
@@ -98,6 +105,52 @@ impl OpenCodeServer {
         Ok(server)
     }
 
+    /// Try to reattach to an OpenCode server on the deterministic port for
+    /// this directory. Returns None if nothing is listening.
+    async fn reattach(
+        directory: PathBuf,
+        opencode_path: &str,
+        permissions: &OpenCodePermissions,
+    ) -> Option<Self> {
+        let port = port_for_directory(&directory);
+        let base_url = format!("http://127.0.0.1:{port}");
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .ok()?;
+
+        let server = Self {
+            directory,
+            port,
+            process: None, // we didn't spawn it
+            base_url,
+            client,
+            restart_count: 0,
+            opencode_path: opencode_path.to_string(),
+            permissions: permissions.clone(),
+        };
+
+        // Quick health check -- if it fails, server is gone
+        match server.health_check().await {
+            Ok(true) => {
+                tracing::info!(
+                    directory = %server.directory.display(),
+                    port,
+                    "reattached to existing OpenCode server"
+                );
+                Some(server)
+            }
+            _ => {
+                tracing::debug!(
+                    directory = %server.directory.display(),
+                    port,
+                    "could not reattach to OpenCode server, not responding"
+                );
+                None
+            }
+        }
+    }
+
     /// Poll the health endpoint until the server is ready.
     async fn wait_for_health(&self) -> anyhow::Result<()> {
         for attempt in 1..=HEALTH_CHECK_MAX_ATTEMPTS {
@@ -131,7 +184,6 @@ impl OpenCodeServer {
 
     /// Check if the server is healthy.
     async fn health_check(&self) -> anyhow::Result<bool> {
-        // Try /global/health first (v2), fall back to /api/health
         let url = format!("{}/global/health", self.base_url);
         let response = self.client
             .get(&url)
@@ -154,12 +206,19 @@ impl OpenCodeServer {
         Ok(response.status().is_success())
     }
 
-    /// Check if the underlying process is still running.
-    pub fn is_alive(&mut self) -> bool {
+    /// Check if the server is still alive. For spawned servers, checks the
+    /// process handle. For reattached servers, does a health check.
+    pub async fn is_alive(&mut self) -> bool {
         match &mut self.process {
             Some(child) => child.try_wait().ok().flatten().is_none(),
-            None => false,
+            // Reattached server -- no process handle, check via HTTP
+            None => self.health_check().await.unwrap_or(false),
         }
+    }
+
+    /// Get the port this server is listening on.
+    pub fn port(&self) -> u16 {
+        self.port
     }
 
     /// Restart the server process. Reuses the same directory and config.
@@ -184,7 +243,8 @@ impl OpenCodeServer {
             let _ = child.kill().await;
         }
 
-        let port = find_free_port()?;
+        // Reuse the same deterministic port
+        let port = port_for_directory(&self.directory);
         let base_url = format!("http://127.0.0.1:{port}");
 
         let env_config = OpenCodeEnvConfig::new(&self.permissions);
@@ -230,6 +290,8 @@ impl OpenCodeServer {
                 "OpenCode server killed"
             );
         }
+        // For reattached servers we don't own the process, so we can't kill it.
+        // It'll get cleaned up when the OS reaps it or the user kills it.
     }
 
     // -- API methods --
@@ -443,9 +505,8 @@ impl OpenCodeServer {
 
 impl Drop for OpenCodeServer {
     fn drop(&mut self) {
-        // Kill the process synchronously on drop to avoid orphans.
-        // `kill_on_drop(true)` handles this for tokio::process::Child,
-        // but we log it for visibility.
+        // Spawned servers: kill_on_drop(true) handles cleanup.
+        // Reattached servers (process: None): left running intentionally.
         if self.process.is_some() {
             tracing::debug!(
                 directory = %self.directory.display(),
@@ -457,8 +518,9 @@ impl Drop for OpenCodeServer {
 
 /// Pool of OpenCode server processes, one per working directory.
 ///
-/// Shared across all agents and workers. Servers are lazily spawned on first
-/// request for a directory and reused for subsequent tasks.
+/// Uses deterministic ports derived from directory paths so that after a
+/// spacebot restart, we can rediscover servers that are still running.
+/// No file persistence needed -- just health-check the expected port.
 pub struct OpenCodeServerPool {
     servers: Mutex<HashMap<PathBuf, Arc<Mutex<OpenCodeServer>>>>,
     opencode_path: String,
@@ -483,8 +545,9 @@ impl OpenCodeServerPool {
 
     /// Get or create a server for the given directory.
     ///
-    /// If a server exists and is healthy, returns it. If it exists but is dead,
-    /// restarts it. If no server exists, spawns a new one (subject to pool limit).
+    /// On first access for a directory, checks the deterministic port for
+    /// a server left over from a previous run. If one responds, reattaches.
+    /// Otherwise spawns a new one. Subsequent calls reuse the pooled server.
     pub async fn get_or_create(
         &self,
         directory: &Path,
@@ -494,14 +557,13 @@ impl OpenCodeServerPool {
 
         let mut servers = self.servers.lock().await;
 
-        // Check existing server
+        // Check if we already have it in the pool
         if let Some(server) = servers.get(&canonical) {
             let mut guard = server.lock().await;
-            if guard.is_alive() {
+            if guard.is_alive().await {
                 return Ok(Arc::clone(server));
             }
 
-            // Server died, try restarting
             tracing::warn!(
                 directory = %canonical.display(),
                 "OpenCode server found dead, restarting"
@@ -510,7 +572,19 @@ impl OpenCodeServerPool {
             return Ok(Arc::clone(server));
         }
 
-        // Enforce pool limit
+        // Not in pool yet. Try reattaching to an existing server on the
+        // deterministic port (left over from a previous spacebot run).
+        if let Some(reattached) = OpenCodeServer::reattach(
+            canonical.clone(),
+            &self.opencode_path,
+            &self.permissions,
+        ).await {
+            let server = Arc::new(Mutex::new(reattached));
+            servers.insert(canonical, Arc::clone(&server));
+            return Ok(server);
+        }
+
+        // No existing server. Enforce pool limit and spawn fresh.
         if servers.len() >= self.max_servers {
             bail!(
                 "OpenCode server pool limit reached ({}). Kill an existing server or increase the limit.",
@@ -518,7 +592,6 @@ impl OpenCodeServerPool {
             );
         }
 
-        // Spawn new server
         let server = OpenCodeServer::spawn(
             canonical.clone(),
             &self.opencode_path,
@@ -550,12 +623,15 @@ impl OpenCodeServerPool {
     }
 }
 
-/// Find a free TCP port by binding to port 0 and reading the assigned port.
-fn find_free_port() -> anyhow::Result<u16> {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .context("failed to find free port")?;
-    let port = listener.local_addr()
-        .context("failed to get local address")?
-        .port();
-    Ok(port)
+/// Derive a deterministic port from a directory path.
+///
+/// Uses a hash of the canonical path mapped into the range 10000-60000.
+/// This means the same directory always gets the same port, so we can
+/// rediscover servers after a restart without persisting state.
+fn port_for_directory(directory: &Path) -> u16 {
+    let mut hasher = DefaultHasher::new();
+    directory.hash(&mut hasher);
+    let hash = hasher.finish();
+    // Map into range 10000..60000 (50000 ports)
+    10000 + (hash % 50000) as u16
 }

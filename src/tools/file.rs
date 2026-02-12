@@ -233,15 +233,26 @@ async fn do_file_list(path: &Path) -> Result<FileOutput, FileError> {
     })
 }
 
-/// Check if a path is in a protected location.
+/// Check if a path is in a protected workspace location.
+///
+/// Workers should not write to identity files, agent databases, compaction
+/// archives, or the ingestion directory. These are managed by other parts
+/// of the system (identity loader, memory store, compactor, ingestion pipeline).
 fn is_protected_path(path: &Path) -> bool {
     let path_str = path.to_string_lossy();
-    path_str.contains("prompts/")
-        || path_str.contains("identity/")
-        || path_str.contains("data/")
-        || path_str.ends_with("SOUL.md")
+
+    // Identity and prompt files
+    path_str.ends_with("SOUL.md")
         || path_str.ends_with("IDENTITY.md")
         || path_str.ends_with("USER.md")
+        || path_str.contains("/prompts/")
+        // Agent data directories (databases, embeddings, config)
+        || path_str.contains("/data/spacebot.db")
+        || path_str.contains("/data/lancedb/")
+        || path_str.contains("/data/config.redb")
+        // Compaction archives and ingestion pipeline
+        || path_str.contains("/archives/")
+        || path_str.contains("/ingest/")
 }
 
 /// File entry metadata (legacy).

@@ -28,7 +28,6 @@ lance-index = "2.0"
 redb = "2.4"
 
 # Vector / embedding operations
-arrow = "54"
 fastembed = "4"
 
 # Encoding

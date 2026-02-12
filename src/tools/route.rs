@@ -77,27 +77,31 @@ impl Tool for RouteTool {
         let worker_id = args.worker_id.parse::<WorkerId>()
             .map_err(|e| RouteError(format!("Invalid worker ID: {e}")))?;
 
-        // Verify the worker exists and is interactive
-        let workers = self.state.active_workers.read().await;
-        let worker = workers.get(&worker_id)
-            .ok_or_else(|| RouteError(format!("Worker {worker_id} not found or not active")))?;
+        // Look up the input sender for this worker
+        let inputs = self.state.worker_inputs.read().await;
+        let input_tx = inputs.get(&worker_id)
+            .ok_or_else(|| RouteError(format!(
+                "Worker {worker_id} not found or not interactive. Only interactive workers accept follow-up messages."
+            )))?
+            .clone();
+        drop(inputs);
 
-        if !worker.is_interactive() {
-            return Err(RouteError(format!("Worker {worker_id} is not interactive")));
-        }
-        drop(workers);
+        // Deliver the message
+        input_tx.send(args.message).await
+            .map_err(|_| RouteError(format!(
+                "Worker {worker_id} has stopped accepting input (channel closed)"
+            )))?;
 
-        // TODO: Send message via the worker's input_tx once we store it accessibly
         tracing::info!(
             worker_id = %worker_id,
             channel_id = %self.state.channel_id,
-            "routing message to worker"
+            "message routed to worker"
         );
 
         Ok(RouteOutput {
             routed: true,
             worker_id,
-            message: format!("Message routed to worker {worker_id}."),
+            message: format!("Message delivered to worker {worker_id}."),
         })
     }
 }

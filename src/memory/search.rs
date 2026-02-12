@@ -287,7 +287,7 @@ fn reciprocal_rank_fusion(
         .map(|(_, (score, memory))| ScoredMemory { memory, score })
         .collect();
     
-    fused.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+    fused.sort_by(|a, b| b.score.total_cmp(&a.score));
     
     fused
 }

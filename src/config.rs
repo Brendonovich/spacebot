@@ -1197,6 +1197,10 @@ pub struct RuntimeConfig {
     pub opencode: ArcSwap<OpenCodeConfig>,
     /// Shared pool of OpenCode server processes. Lazily initialized on first use.
     pub opencode_server_pool: Arc<crate::opencode::OpenCodeServerPool>,
+    /// Heartbeat store, set after agent initialization.
+    pub heartbeat_store: ArcSwap<Option<Arc<crate::heartbeat::HeartbeatStore>>>,
+    /// Heartbeat scheduler, set after agent initialization.
+    pub heartbeat_scheduler: ArcSwap<Option<Arc<crate::heartbeat::Scheduler>>>,
 }
 
 impl RuntimeConfig {
@@ -1233,7 +1237,19 @@ impl RuntimeConfig {
             skills: ArcSwap::from_pointee(skills),
             opencode: ArcSwap::from_pointee(defaults.opencode.clone()),
             opencode_server_pool: Arc::new(server_pool),
+            heartbeat_store: ArcSwap::from_pointee(None),
+            heartbeat_scheduler: ArcSwap::from_pointee(None),
         }
+    }
+
+    /// Set the heartbeat store and scheduler after initialization.
+    pub fn set_heartbeat(
+        &self,
+        store: Arc<crate::heartbeat::HeartbeatStore>,
+        scheduler: Arc<crate::heartbeat::Scheduler>,
+    ) {
+        self.heartbeat_store.store(Arc::new(Some(store)));
+        self.heartbeat_scheduler.store(Arc::new(Some(scheduler)));
     }
 
     /// Reload tunable config values from a freshly parsed Config.

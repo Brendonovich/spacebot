@@ -255,6 +255,9 @@ async fn main() -> anyhow::Result<()> {
 
         let scheduler = Arc::new(spacebot::heartbeat::Scheduler::new(heartbeat_context));
 
+        // Make heartbeat store and scheduler available via RuntimeConfig
+        agent.deps.runtime_config.set_heartbeat(store.clone(), scheduler.clone());
+
         match store.load_all().await {
             Ok(configs) => {
                 for hb_config in configs {

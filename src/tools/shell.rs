@@ -99,6 +99,20 @@ impl Tool for ShellTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        // Reject commands that target protected workspace paths
+        if let Some(ref dir) = args.working_dir {
+            let path = std::path::Path::new(dir);
+            if is_protected_working_dir(path) {
+                return Err(ShellError {
+                    message: format!(
+                        "Cannot use protected directory as working_dir: {dir}. \
+                         Agent data, archives, and ingestion directories are managed by the system."
+                    ),
+                    exit_code: -1,
+                });
+            }
+        }
+
         let mut cmd = if cfg!(target_os = "windows") {
             let mut c = Command::new("cmd");
             c.arg("/C").arg(&args.command);
@@ -203,4 +217,13 @@ impl ShellResult {
     pub fn format(&self) -> String {
         format_shell_output(self.exit_code, &self.stdout, &self.stderr)
     }
+}
+
+/// Check if a directory path is in a protected workspace location.
+fn is_protected_working_dir(path: &std::path::Path) -> bool {
+    let path_str = path.to_string_lossy();
+    path_str.contains("/data/lancedb")
+        || path_str.contains("/archives/")
+        || path_str.contains("/ingest/")
+        || path_str.ends_with("/data")
 }

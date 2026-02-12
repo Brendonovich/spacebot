@@ -2,6 +2,9 @@
 //!
 //! Only the subset of the API surface that Spacebot needs is modeled here.
 //! OpenCode has a much larger API (PTY, LSP, TUI, MCP, etc.) that we ignore.
+//!
+//! Every SSE event from OpenCode follows the envelope: `{ type: "...", properties: { ... } }`.
+//! The `properties` content varies per event type.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -118,78 +121,195 @@ pub struct TimeSpan {
 /// A message in a session.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Message {
+pub struct MessageInfo {
     pub id: String,
     pub role: String,
-    #[serde(default)]
+    #[serde(rename = "sessionID", default)]
     pub session_id: Option<String>,
     #[serde(default)]
     pub time: Option<TimeSpan>,
 }
 
 // -- SSE Event types --
+//
+// Every SSE event is `{ type: "event.name", properties: { ... } }`.
+// We use a two-level deserialization: first extract the envelope, then
+// match on `type` and parse `properties` accordingly.
 
-/// Top-level SSE event wrapper. OpenCode sends events as `data: <json>` lines
-/// with the event type embedded in the JSON payload's `type` field.
+/// Raw SSE event envelope from OpenCode.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "kebab-case")]
+pub struct SseEventEnvelope {
+    #[serde(rename = "type")]
+    pub event_type: String,
+    #[serde(default)]
+    pub properties: serde_json::Value,
+}
+
+/// Parsed SSE event. Constructed from `SseEventEnvelope` after matching on type.
+#[derive(Debug, Clone)]
 pub enum SseEvent {
-    #[serde(rename = "message.updated")]
     MessageUpdated {
-        #[serde(default)]
-        info: Option<serde_json::Value>,
+        info: Option<MessageInfo>,
     },
-    #[serde(rename = "message.part.updated")]
     MessagePartUpdated {
         part: Part,
-        #[serde(default)]
         delta: Option<String>,
     },
-    #[serde(rename = "session.idle")]
     SessionIdle {
-        #[serde(rename = "sessionID")]
         session_id: String,
     },
-    #[serde(rename = "session.error")]
     SessionError {
-        #[serde(rename = "sessionID", default)]
         session_id: Option<String>,
-        #[serde(default)]
         error: Option<serde_json::Value>,
     },
-    #[serde(rename = "session.status")]
     SessionStatus {
-        #[serde(rename = "sessionID")]
         session_id: String,
         status: SessionStatusPayload,
     },
-    #[serde(rename = "permission.asked")]
     PermissionAsked(PermissionRequest),
-    #[serde(rename = "permission.replied")]
     PermissionReplied {
-        #[serde(rename = "sessionID")]
         session_id: String,
-        #[serde(rename = "requestID")]
         request_id: String,
         reply: String,
     },
-    #[serde(rename = "question.asked")]
     QuestionAsked(QuestionRequest),
-    #[serde(rename = "question.replied")]
     QuestionReplied {
-        #[serde(rename = "sessionID")]
         session_id: String,
-        #[serde(rename = "requestID")]
         request_id: String,
     },
-    /// Catch-all for events we don't care about.
-    #[serde(other)]
-    Unknown,
+    Unknown(String),
 }
 
-/// A content part within a message.
+impl SseEvent {
+    /// Parse from an envelope. Returns `Unknown` for unrecognized event types.
+    pub fn from_envelope(envelope: SseEventEnvelope) -> Self {
+        let props = envelope.properties;
+
+        match envelope.event_type.as_str() {
+            "message.updated" => {
+                let info = serde_json::from_value::<MessageUpdatedProps>(props)
+                    .ok()
+                    .and_then(|p| p.info);
+                SseEvent::MessageUpdated { info }
+            }
+            "message.part.updated" => {
+                match serde_json::from_value::<MessagePartUpdatedProps>(props) {
+                    Ok(p) => SseEvent::MessagePartUpdated {
+                        part: p.part,
+                        delta: p.delta,
+                    },
+                    Err(error) => {
+                        tracing::trace!(%error, "failed to parse message.part.updated properties");
+                        SseEvent::Unknown("message.part.updated (parse error)".into())
+                    }
+                }
+            }
+            "session.idle" => match serde_json::from_value::<SessionIdProps>(props) {
+                Ok(p) => SseEvent::SessionIdle {
+                    session_id: p.session_id,
+                },
+                Err(_) => SseEvent::Unknown("session.idle (parse error)".into()),
+            },
+            "session.error" => {
+                let p = serde_json::from_value::<SessionErrorProps>(props).unwrap_or_default();
+                SseEvent::SessionError {
+                    session_id: p.session_id,
+                    error: p.error,
+                }
+            }
+            "session.status" => match serde_json::from_value::<SessionStatusProps>(props) {
+                Ok(p) => SseEvent::SessionStatus {
+                    session_id: p.session_id,
+                    status: p.status,
+                },
+                Err(_) => SseEvent::Unknown("session.status (parse error)".into()),
+            },
+            "permission.asked" => match serde_json::from_value::<PermissionRequest>(props) {
+                Ok(p) => SseEvent::PermissionAsked(p),
+                Err(_) => SseEvent::Unknown("permission.asked (parse error)".into()),
+            },
+            "permission.replied" => match serde_json::from_value::<PermissionRepliedProps>(props) {
+                Ok(p) => SseEvent::PermissionReplied {
+                    session_id: p.session_id,
+                    request_id: p.request_id,
+                    reply: p.reply,
+                },
+                Err(_) => SseEvent::Unknown("permission.replied (parse error)".into()),
+            },
+            "question.asked" => match serde_json::from_value::<QuestionRequest>(props) {
+                Ok(p) => SseEvent::QuestionAsked(p),
+                Err(_) => SseEvent::Unknown("question.asked (parse error)".into()),
+            },
+            "question.replied" => match serde_json::from_value::<QuestionRepliedProps>(props) {
+                Ok(p) => SseEvent::QuestionReplied {
+                    session_id: p.session_id,
+                    request_id: p.request_id,
+                },
+                Err(_) => SseEvent::Unknown("question.replied (parse error)".into()),
+            },
+            other => SseEvent::Unknown(other.to_string()),
+        }
+    }
+}
+
+// -- Properties structs for each event type --
+
+#[derive(Debug, Deserialize)]
+struct MessageUpdatedProps {
+    #[serde(default)]
+    info: Option<MessageInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MessagePartUpdatedProps {
+    part: Part,
+    #[serde(default)]
+    delta: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionIdProps {
+    #[serde(rename = "sessionID")]
+    session_id: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SessionErrorProps {
+    #[serde(rename = "sessionID", default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    error: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionStatusProps {
+    #[serde(rename = "sessionID")]
+    session_id: String,
+    status: SessionStatusPayload,
+}
+
+#[derive(Debug, Deserialize)]
+struct PermissionRepliedProps {
+    #[serde(rename = "sessionID")]
+    session_id: String,
+    #[serde(rename = "requestID")]
+    request_id: String,
+    reply: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct QuestionRepliedProps {
+    #[serde(rename = "sessionID")]
+    session_id: String,
+    #[serde(rename = "requestID")]
+    request_id: String,
+}
+
+// -- Part types --
+
+/// A content part within a message. Discriminated by `type` field.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "kebab-case")]
+#[serde(tag = "type")]
 pub enum Part {
     #[serde(rename = "text")]
     Text {
@@ -212,8 +332,11 @@ pub enum Part {
         message_id: Option<String>,
         #[serde(rename = "callID", default)]
         call_id: Option<String>,
+        /// The tool name (e.g. "bash", "read", "edit", "task").
         #[serde(default)]
         tool: Option<String>,
+        /// Tool execution state. This is a tagged object with `status` as discriminant,
+        /// not a simple enum. Contains `input`, `output`, `title`, `time`, etc.
         #[serde(default)]
         state: Option<ToolState>,
     },
@@ -231,19 +354,79 @@ pub enum Part {
         #[serde(default)]
         reason: Option<String>,
     },
-    /// Catch-all for part types we don't process (reasoning, file, subtask, etc.)
+    /// Catch-all for part types we don't process (reasoning, file, subtask, snapshot, etc.)
     #[serde(other)]
     Other,
 }
 
-/// Tool execution state.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+/// Tool execution state. Tagged by `status` field.
+///
+/// OpenCode sends this as e.g.:
+/// ```json
+/// { "status": "running", "input": {...}, "title": "...", "time": { "start": 1234 } }
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum ToolState {
-    Pending,
-    Running,
-    Completed,
-    Error,
+    #[serde(rename = "pending")]
+    Pending {
+        #[serde(default)]
+        input: Option<serde_json::Value>,
+    },
+    #[serde(rename = "running")]
+    Running {
+        #[serde(default)]
+        input: Option<serde_json::Value>,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        metadata: Option<HashMap<String, serde_json::Value>>,
+    },
+    #[serde(rename = "completed")]
+    Completed {
+        #[serde(default)]
+        input: Option<serde_json::Value>,
+        #[serde(default)]
+        output: Option<String>,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        metadata: Option<HashMap<String, serde_json::Value>>,
+    },
+    #[serde(rename = "error")]
+    Error {
+        #[serde(default)]
+        input: Option<serde_json::Value>,
+        #[serde(default)]
+        error: Option<String>,
+    },
+}
+
+impl ToolState {
+    /// Check if this is a running state.
+    pub fn is_running(&self) -> bool {
+        matches!(self, ToolState::Running { .. })
+    }
+
+    /// Check if this is a completed state.
+    pub fn is_completed(&self) -> bool {
+        matches!(self, ToolState::Completed { .. })
+    }
+
+    /// Check if this is an error state.
+    pub fn is_error(&self) -> bool {
+        matches!(self, ToolState::Error { .. })
+    }
+
+    /// Get a display-friendly status string.
+    pub fn status_str(&self) -> &'static str {
+        match self {
+            ToolState::Pending { .. } => "pending",
+            ToolState::Running { .. } => "running",
+            ToolState::Completed { .. } => "completed",
+            ToolState::Error { .. } => "error",
+        }
+    }
 }
 
 /// Session status payload.
@@ -253,6 +436,7 @@ pub enum SessionStatusPayload {
     Idle,
     Busy,
     Retry {
+        #[serde(default)]
         attempt: u32,
         #[serde(default)]
         message: Option<String>,

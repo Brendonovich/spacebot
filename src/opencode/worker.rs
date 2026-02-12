@@ -222,18 +222,23 @@ impl OpenCodeWorker {
         let mut buffer = String::new();
         let mut last_text = String::new();
         let mut current_tool: Option<String> = None;
+        // Guards: don't treat session.idle as completion until we've seen real work
+        let mut has_received_event = false;
+        let mut has_assistant_message = false;
 
         loop {
             let chunk = tokio::select! {
                 chunk = stream.next() => chunk,
-                // Give the event loop a chance to process other tasks
                 _ = tokio::time::sleep(std::time::Duration::from_secs(600)) => {
                     bail!("OpenCode session timed out after 10 minutes of inactivity");
                 }
             };
 
             let Some(chunk) = chunk else {
-                // Stream ended unexpectedly
+                // Stream ended -- if we have results, return them
+                if has_assistant_message && !last_text.is_empty() {
+                    return Ok(last_text);
+                }
                 bail!("OpenCode event stream ended before session completed");
             };
 
@@ -248,6 +253,8 @@ impl OpenCodeWorker {
                     server,
                     &mut last_text,
                     &mut current_tool,
+                    &mut has_received_event,
+                    &mut has_assistant_message,
                 ).await {
                     EventAction::Continue => {}
                     EventAction::Complete => return Ok(last_text.clone()),
@@ -265,17 +272,35 @@ impl OpenCodeWorker {
         server: &Arc<Mutex<crate::opencode::server::OpenCodeServer>>,
         last_text: &mut String,
         current_tool: &mut Option<String>,
+        has_received_event: &mut bool,
+        has_assistant_message: &mut bool,
     ) -> EventAction {
         match event {
+            SseEvent::MessageUpdated { info } => {
+                *has_received_event = true;
+                // Track assistant messages for idle guard
+                if let Some(msg) = info {
+                    if msg.role == "assistant" {
+                        if let Some(sid) = &msg.session_id {
+                            if sid == session_id {
+                                *has_assistant_message = true;
+                            }
+                        }
+                    }
+                }
+                EventAction::Continue
+            }
+
             SseEvent::MessagePartUpdated { part, .. } => {
+                *has_received_event = true;
                 match part {
                     Part::Text { text, session_id: part_session, .. } => {
-                        // Only process events for our session
                         if let Some(sid) = part_session {
                             if sid != session_id {
                                 return EventAction::Continue;
                             }
                         }
+                        *has_assistant_message = true;
                         *last_text = text.clone();
                     }
                     Part::Tool { tool, state, session_id: part_session, .. } => {
@@ -284,22 +309,29 @@ impl OpenCodeWorker {
                                 return EventAction::Continue;
                             }
                         }
+                        *has_assistant_message = true;
                         if let Some(tool_name) = tool {
-                            match state {
-                                Some(ToolState::Running) => {
-                                    *current_tool = Some(tool_name.clone());
-                                    self.send_status(&format!("running: {tool_name}"));
-                                }
-                                Some(ToolState::Completed) => {
-                                    if current_tool.as_deref() == Some(tool_name.as_str()) {
-                                        *current_tool = None;
+                            if let Some(tool_state) = state {
+                                match tool_state {
+                                    ToolState::Running { title, .. } => {
+                                        *current_tool = Some(tool_name.clone());
+                                        let label = title.as_deref().unwrap_or(tool_name.as_str());
+                                        self.send_status(&format!("running: {label}"));
                                     }
-                                    self.send_status("working");
+                                    ToolState::Completed { .. } => {
+                                        if current_tool.as_deref() == Some(tool_name.as_str()) {
+                                            *current_tool = None;
+                                        }
+                                        self.send_status("working");
+                                    }
+                                    ToolState::Error { error, .. } => {
+                                        let description = error.as_deref().unwrap_or("unknown");
+                                        self.send_status(&format!("tool error: {tool_name}: {description}"));
+                                    }
+                                    ToolState::Pending { .. } => {
+                                        // Tool queued, no status update needed
+                                    }
                                 }
-                                Some(ToolState::Error) => {
-                                    self.send_status(&format!("tool error: {tool_name}"));
-                                }
-                                _ => {}
                             }
                         }
                     }
@@ -309,22 +341,35 @@ impl OpenCodeWorker {
             }
 
             SseEvent::SessionIdle { session_id: event_session_id } => {
-                if event_session_id == session_id {
-                    return EventAction::Complete;
+                if event_session_id != session_id {
+                    return EventAction::Continue;
                 }
-                EventAction::Continue
+
+                // Guard: don't complete until we've seen actual work.
+                // OpenCode can send an early idle event before the prompt is processed.
+                if !*has_received_event || !*has_assistant_message {
+                    tracing::trace!(
+                        worker_id = %self.id,
+                        has_received_event,
+                        has_assistant_message,
+                        "ignoring early session.idle"
+                    );
+                    return EventAction::Continue;
+                }
+
+                EventAction::Complete
             }
 
             SseEvent::SessionError { session_id: event_session_id, error } => {
-                if event_session_id.as_deref() == Some(session_id) {
-                    let message = error
-                        .as_ref()
-                        .and_then(|e| e.get("message").and_then(|v| v.as_str()))
-                        .unwrap_or("unknown error")
-                        .to_string();
-                    return EventAction::Error(message);
+                if event_session_id.as_deref() != Some(session_id) {
+                    return EventAction::Continue;
                 }
-                EventAction::Continue
+                let message = error
+                    .as_ref()
+                    .and_then(|e| e.get("message").and_then(|v| v.as_str()))
+                    .unwrap_or("unknown error")
+                    .to_string();
+                EventAction::Error(message)
             }
 
             SseEvent::PermissionAsked(permission) => {
@@ -340,7 +385,6 @@ impl OpenCodeWorker {
                     "OpenCode requesting permission"
                 );
 
-                // Send permission request to channel for user decision
                 let _ = self.event_tx.send(ProcessEvent::WorkerPermission {
                     agent_id: self.agent_id.clone(),
                     worker_id: self.id,
@@ -354,10 +398,7 @@ impl OpenCodeWorker {
                     patterns: permission.patterns.clone(),
                 });
 
-                // For now, auto-allow. The channel event handler can override
-                // this by calling reply_permission on the server before we do.
-                // In practice, the OPENCODE_CONFIG_CONTENT permissions should
-                // prevent most permission prompts from appearing.
+                // Auto-allow (OPENCODE_CONFIG_CONTENT should prevent most prompts)
                 let guard = server.lock().await;
                 if let Err(error) = guard.reply_permission(&permission.id, PermissionReply::Once).await {
                     tracing::warn!(
@@ -383,14 +424,13 @@ impl OpenCodeWorker {
                     "OpenCode asking question"
                 );
 
-                // Send question to channel for user answer
                 let _ = self.event_tx.send(ProcessEvent::WorkerQuestion {
                     agent_id: self.agent_id.clone(),
                     worker_id: self.id,
                     channel_id: self.channel_id.clone(),
                     question_id: question.id.clone(),
                     questions: question.questions.iter().map(|q| {
-                        crate::opencode::types::QuestionInfo {
+                        QuestionInfo {
                             question: q.question.clone(),
                             header: q.header.clone(),
                             options: q.options.clone(),
@@ -398,8 +438,7 @@ impl OpenCodeWorker {
                     }).collect(),
                 });
 
-                // Auto-select first option if available, otherwise we need
-                // to wait for user input via the input_rx channel
+                // Auto-select first option
                 let answers: Vec<QuestionAnswer> = question.questions.iter().map(|q| {
                     if let Some(first_option) = q.options.first() {
                         QuestionAnswer {
@@ -428,19 +467,18 @@ impl OpenCodeWorker {
             }
 
             SseEvent::SessionStatus { session_id: event_session_id, status } => {
-                if event_session_id == session_id {
-                    match status {
-                        SessionStatusPayload::Retry { attempt, message, .. } => {
-                            let description = message.as_deref().unwrap_or("rate limited");
-                            self.send_status(&format!("retry attempt {attempt}: {description}"));
-                        }
-                        SessionStatusPayload::Busy => {
-                            self.send_status("working");
-                        }
-                        SessionStatusPayload::Idle => {
-                            // Handled by SessionIdle event
-                        }
+                if event_session_id != session_id {
+                    return EventAction::Continue;
+                }
+                match status {
+                    SessionStatusPayload::Retry { attempt, message, .. } => {
+                        let description = message.as_deref().unwrap_or("rate limited");
+                        self.send_status(&format!("retry attempt {attempt}: {description}"));
                     }
+                    SessionStatusPayload::Busy => {
+                        self.send_status("working");
+                    }
+                    SessionStatusPayload::Idle => {}
                 }
                 EventAction::Continue
             }
@@ -467,8 +505,8 @@ enum EventAction {
     Error(String),
 }
 
-/// Parse an SSE event from a buffer. Returns the parsed event and removes the
-/// consumed bytes from the buffer. Returns None if no complete event is available.
+/// Parse an SSE event from a buffer. Parses the `{ type, properties }` envelope
+/// and converts to our `SseEvent` enum. Returns None if no complete event is available.
 fn extract_sse_event(buffer: &mut String) -> Option<SseEvent> {
     // SSE format: lines starting with "data: " followed by JSON, terminated by
     // a blank line. We may also see "event:" and "id:" lines which we ignore.
@@ -496,13 +534,14 @@ fn extract_sse_event(buffer: &mut String) -> Option<SseEvent> {
             continue;
         }
 
-        match serde_json::from_str::<SseEvent>(&json_str) {
-            Ok(event) => return Some(event),
+        // Parse the envelope first, then convert to our event type
+        match serde_json::from_str::<SseEventEnvelope>(&json_str) {
+            Ok(envelope) => return Some(SseEvent::from_envelope(envelope)),
             Err(error) => {
                 tracing::trace!(
                     %error,
                     json = %json_str,
-                    "failed to parse SSE event, skipping"
+                    "failed to parse SSE event envelope, skipping"
                 );
                 continue;
             }

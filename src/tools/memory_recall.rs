@@ -127,15 +127,31 @@ impl Tool for MemoryRecallTool {
             .await
             .map_err(|e| MemoryRecallError(format!("Search failed: {e}")))?;
 
+        // Apply memory_type filter if specified
+        let filtered_results: Vec<_> = if let Some(ref type_filter) = args.memory_type {
+            search_results
+                .into_iter()
+                .filter(|r| r.memory.memory_type.to_string() == *type_filter)
+                .collect()
+        } else {
+            search_results
+        };
+
         // Curate results to get the most relevant
-        let curated = curate_results(&search_results, args.max_results);
+        let curated = curate_results(&filtered_results, args.max_results);
 
         // Record access for found memories and convert to output format
         let store = self.memory_search.store();
         let mut memories = Vec::new();
 
         for (idx, memory) in curated.iter().enumerate() {
-            let _ = store.record_access(&memory.id).await;
+            if let Err(error) = store.record_access(&memory.id).await {
+                tracing::warn!(
+                    memory_id = %memory.id,
+                    %error,
+                    "failed to record memory access"
+                );
+            }
 
             memories.push(MemoryOutput {
                 id: memory.id.clone(),
@@ -143,11 +159,11 @@ impl Tool for MemoryRecallTool {
                 memory_type: memory.memory_type.to_string(),
                 importance: memory.importance,
                 created_at: memory.created_at.to_rfc3339(),
-                relevance_score: search_results.get(idx).map(|r| r.score).unwrap_or(0.0),
+                relevance_score: filtered_results.get(idx).map(|r| r.score).unwrap_or(0.0),
             });
         }
 
-        let total_found = search_results.len();
+        let total_found = filtered_results.len();
         let summary = format_memories(&memories);
 
         Ok(MemoryRecallOutput {

@@ -29,6 +29,9 @@ pub struct ChannelState {
     pub history: Arc<RwLock<Vec<rig::message::Message>>>,
     pub active_branches: Arc<RwLock<HashMap<BranchId, tokio::task::JoinHandle<()>>>>,
     pub active_workers: Arc<RwLock<HashMap<WorkerId, Worker>>>,
+    /// Input senders for interactive workers, keyed by worker ID.
+    /// Used by the route tool to deliver follow-up messages.
+    pub worker_inputs: Arc<RwLock<HashMap<WorkerId, tokio::sync::mpsc::Sender<String>>>>,
     pub status_block: Arc<RwLock<StatusBlock>>,
     pub deps: AgentDeps,
     pub conversation_logger: ConversationLogger,
@@ -107,6 +110,7 @@ impl Channel {
             history: history.clone(),
             active_branches: active_branches.clone(),
             active_workers: active_workers.clone(),
+            worker_inputs: Arc::new(RwLock::new(HashMap::new())),
             status_block: status_block.clone(),
             deps: deps.clone(),
             conversation_logger,
@@ -409,6 +413,10 @@ impl Channel {
             ProcessEvent::WorkerComplete { worker_id, result, notify, .. } => {
                 let mut workers = self.state.active_workers.write().await;
                 workers.remove(worker_id);
+                drop(workers);
+
+                // Clean up the input sender for interactive workers
+                self.state.worker_inputs.write().await.remove(worker_id);
 
                 if *notify {
                     let mut history = self.state.history.write().await;
@@ -643,7 +651,7 @@ pub async fn spawn_worker_from_state(
     };
     
     let worker = if interactive {
-        let (worker, _input_tx) = Worker::new_interactive(
+        let (worker, input_tx) = Worker::new_interactive(
             Some(state.channel_id.clone()),
             &task,
             &system_prompt,
@@ -653,7 +661,8 @@ pub async fn spawn_worker_from_state(
             brave_search_key.clone(),
             state.logs_dir.clone(),
         );
-        // TODO: Store input_tx somewhere accessible for routing follow-ups
+        let worker_id = worker.id;
+        state.worker_inputs.write().await.insert(worker_id, input_tx);
         worker
     } else {
         Worker::new(
@@ -735,7 +744,7 @@ pub async fn spawn_opencode_worker_from_state(
     let server_pool = rc.opencode_server_pool.clone();
 
     let worker = if interactive {
-        let (worker, _input_tx) = crate::opencode::OpenCodeWorker::new_interactive(
+        let (worker, input_tx) = crate::opencode::OpenCodeWorker::new_interactive(
             Some(state.channel_id.clone()),
             state.deps.agent_id.clone(),
             &task,
@@ -743,7 +752,8 @@ pub async fn spawn_opencode_worker_from_state(
             server_pool,
             state.deps.event_tx.clone(),
         );
-        // TODO: Store input_tx for routing follow-ups (same gap as builtin interactive workers)
+        let worker_id = worker.id;
+        state.worker_inputs.write().await.insert(worker_id, input_tx);
         worker
     } else {
         crate::opencode::OpenCodeWorker::new(
