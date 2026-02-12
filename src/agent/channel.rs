@@ -1,5 +1,7 @@
 //! Channel: User-facing conversation process.
 
+use crate::agent::compactor::Compactor;
+use crate::config::CompactionConfig;
 use crate::error::{AgentError, Result};
 use crate::llm::SpacebotModel;
 use crate::conversation::ConversationLogger;
@@ -22,6 +24,10 @@ pub struct ChannelConfig {
     pub max_concurrent_branches: usize,
     /// Maximum turns for channel LLM calls.
     pub max_turns: usize,
+    /// Context window size in tokens.
+    pub context_window: usize,
+    /// Compaction thresholds.
+    pub compaction: CompactionConfig,
 }
 
 impl Default for ChannelConfig {
@@ -29,6 +35,8 @@ impl Default for ChannelConfig {
         Self {
             max_concurrent_branches: 5,
             max_turns: 5,
+            context_window: 128_000,
+            compaction: CompactionConfig::default(),
         }
     }
 }
@@ -82,6 +90,8 @@ pub struct Channel {
     pub conversation_id: Option<String>,
     /// Conversation context (platform, channel name, server) captured from the first message.
     pub conversation_context: Option<String>,
+    /// Context monitor that triggers background compaction.
+    pub compactor: Compactor,
 }
 
 impl Channel {
@@ -94,6 +104,7 @@ impl Channel {
         identity_context: impl Into<String>,
         branch_system_prompt: impl Into<String>,
         worker_system_prompt: impl Into<String>,
+        compactor_prompt: impl Into<String>,
         response_tx: mpsc::Sender<OutboundResponse>,
         event_rx: broadcast::Receiver<ProcessEvent>,
     ) -> (Self, mpsc::Sender<InboundMessage>) {
@@ -106,6 +117,16 @@ impl Channel {
         let (message_tx, message_rx) = mpsc::channel(64);
 
         let conversation_logger = ConversationLogger::new(deps.sqlite_pool.clone());
+
+        let compactor = Compactor::new(
+            id.clone(),
+            config.compaction,
+            config.context_window,
+            deps.clone(),
+            history.clone(),
+            conversation_logger.clone(),
+            compactor_prompt.into(),
+        );
 
         let state = ChannelState {
             channel_id: id.clone(),
@@ -136,6 +157,7 @@ impl Channel {
             self_tx,
             conversation_id: None,
             conversation_context: None,
+            compactor,
         };
         
         (channel, message_tx)
@@ -292,6 +314,11 @@ impl Channel {
             Err(error) => {
                 tracing::error!(channel_id = %self.id, %error, "channel LLM call failed");
             }
+        }
+
+        // Check context size and trigger compaction if needed
+        if let Err(error) = self.compactor.check_and_compact().await {
+            tracing::warn!(channel_id = %self.id, %error, "compaction check failed");
         }
         
         Ok(())

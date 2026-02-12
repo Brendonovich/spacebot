@@ -328,19 +328,29 @@ impl EventHandler for Handler {
             }
         }
 
-        if let Some(guild_id) = message.guild_id {
-            if let Some(allowed_channels) = self.channel_filter.get(&guild_id) {
-                if !allowed_channels.is_empty()
-                    && !allowed_channels.contains(&message.channel_id)
-                {
-                    return;
-                }
-            }
-        }
-
         let conversation_id = build_conversation_id(&message);
         let content = extract_content(&message);
         let metadata = build_metadata(&ctx, &message).await;
+
+        // Channel filter: allow if the channel ID or its parent (for threads) is in the allowlist
+        if let Some(guild_id) = message.guild_id {
+            if let Some(allowed_channels) = self.channel_filter.get(&guild_id) {
+                if !allowed_channels.is_empty() {
+                    let parent_channel_id = metadata
+                        .get("discord_parent_channel_id")
+                        .and_then(|v| v.as_u64())
+                        .map(ChannelId::new);
+
+                    let direct_match = allowed_channels.contains(&message.channel_id);
+                    let parent_match = parent_channel_id
+                        .is_some_and(|pid| allowed_channels.contains(&pid));
+
+                    if !direct_match && !parent_match {
+                        return;
+                    }
+                }
+            }
+        }
 
         let inbound = InboundMessage {
             id: message.id.to_string(),
@@ -423,10 +433,18 @@ async fn build_metadata(ctx: &Context, message: &Message) -> HashMap<String, ser
         }
     }
 
-    // Try to get channel name
+    // Try to get channel name and detect threads
     if let Ok(channel) = message.channel_id.to_channel(&ctx.http).await {
         if let Some(guild_channel) = channel.guild() {
             metadata.insert("discord_channel_name".into(), guild_channel.name.clone().into());
+
+            // Threads have a parent_id pointing to the text channel they were created in
+            if guild_channel.thread_metadata.is_some() {
+                metadata.insert("discord_is_thread".into(), true.into());
+                if let Some(parent_id) = guild_channel.parent_id {
+                    metadata.insert("discord_parent_channel_id".into(), parent_id.get().into());
+                }
+            }
         }
     }
 

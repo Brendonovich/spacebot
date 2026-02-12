@@ -208,9 +208,21 @@ impl Binding {
                 .get("discord_channel_id")
                 .and_then(|v| v.as_u64())
                 .map(|v| v.to_string());
-            match message_channel {
-                Some(id) if self.channel_ids.contains(&id) => {}
-                _ => return false,
+            let parent_channel = message
+                .metadata
+                .get("discord_parent_channel_id")
+                .and_then(|v| v.as_u64())
+                .map(|v| v.to_string());
+
+            let direct_match = message_channel
+                .as_ref()
+                .is_some_and(|id| self.channel_ids.contains(id));
+            let parent_match = parent_channel
+                .as_ref()
+                .is_some_and(|id| self.channel_ids.contains(id));
+
+            if !direct_match && !parent_match {
+                return false;
             }
         }
 

@@ -146,7 +146,7 @@ impl Worker {
 
         let agent = AgentBuilder::new(model)
             .preamble(&self.system_prompt)
-            .default_max_turns(50)
+            .default_max_turns(100)
             .tool_server_handle(worker_tool_server)
             .build();
 

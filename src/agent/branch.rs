@@ -66,7 +66,7 @@ impl Branch {
 
         let agent = AgentBuilder::new(model)
             .preamble(&self.system_prompt)
-            .default_max_turns(10)
+            .default_max_turns(50)
             .tool_server_handle(self.deps.tool_server.clone())
             .build();
 

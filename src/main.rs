@@ -259,11 +259,14 @@ async fn main() -> anyhow::Result<()> {
                         spacebot::agent::channel::ChannelConfig {
                             max_concurrent_branches: agent.config.max_concurrent_branches,
                             max_turns: agent.config.max_turns,
+                            context_window: agent.config.context_window,
+                            compaction: agent.config.compaction,
                         },
                         &agent.prompts.channel,
                         agent.identity.render(),
                         &agent.prompts.branch,
                         &agent.prompts.worker,
+                        &agent.prompts.compactor,
                         response_tx,
                         event_rx,
                     );
