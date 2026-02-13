@@ -1,5 +1,6 @@
 //! Cross-channel transcript recall tool for branches.
 
+use crate::conversation::channels::ChannelStore;
 use crate::conversation::history::ConversationLogger;
 
 use rig::completion::ToolDefinition;
@@ -14,11 +15,12 @@ const MAX_TRANSCRIPT_MESSAGES: i64 = 100;
 #[derive(Debug, Clone)]
 pub struct ChannelRecallTool {
     conversation_logger: ConversationLogger,
+    channel_store: ChannelStore,
 }
 
 impl ChannelRecallTool {
-    pub fn new(conversation_logger: ConversationLogger) -> Self {
-        Self { conversation_logger }
+    pub fn new(conversation_logger: ConversationLogger, channel_store: ChannelStore) -> Self {
+        Self { conversation_logger, channel_store }
     }
 }
 
@@ -75,7 +77,6 @@ pub struct ChannelRecallOutput {
 pub struct ChannelListEntry {
     pub channel_id: String,
     pub channel_name: Option<String>,
-    pub message_count: i64,
     pub last_activity: String,
 }
 
@@ -117,13 +118,12 @@ impl Tool for ChannelRecallTool {
         let limit = args.limit.min(MAX_TRANSCRIPT_MESSAGES).max(1);
 
         // Resolve channel name to ID
-        let channel_id = self.conversation_logger
-            .find_channel_by_name(&channel_query)
+        let found = self.channel_store
+            .find_by_name(&channel_query)
             .await
             .map_err(|e| ChannelRecallError(format!("Failed to search channels: {e}")))?;
 
-        let Some(channel_id) = channel_id else {
-            // Fall back to listing channels so the agent can pick the right one
+        let Some(channel) = found else {
             let mut output = self.list_channels().await?;
             output.summary = format!(
                 "No channel matching \"{}\" was found. Here are the available channels:\n\n{}",
@@ -134,14 +134,9 @@ impl Tool for ChannelRecallTool {
 
         // Load transcript
         let messages = self.conversation_logger
-            .load_channel_transcript(&channel_id, limit)
+            .load_channel_transcript(&channel.id, limit)
             .await
             .map_err(|e| ChannelRecallError(format!("Failed to load transcript: {e}")))?;
-
-        // Resolve channel name for display
-        let channel_name = self.conversation_logger
-            .resolve_channel_name(&channel_id)
-            .await;
 
         let transcript: Vec<TranscriptMessage> = messages.iter().map(|message| {
             TranscriptMessage {
@@ -152,12 +147,12 @@ impl Tool for ChannelRecallTool {
             }
         }).collect();
 
-        let summary = format_transcript(&channel_name, &channel_id, &transcript);
+        let summary = format_transcript(&channel.display_name, &channel.id, &transcript);
 
         Ok(ChannelRecallOutput {
             action: "transcript".to_string(),
-            channel_id: Some(channel_id),
-            channel_name,
+            channel_id: Some(channel.id),
+            channel_name: channel.display_name,
             messages: transcript,
             available_channels: vec![],
             summary,
@@ -167,17 +162,16 @@ impl Tool for ChannelRecallTool {
 
 impl ChannelRecallTool {
     async fn list_channels(&self) -> std::result::Result<ChannelRecallOutput, ChannelRecallError> {
-        let channels = self.conversation_logger
-            .list_channels()
+        let channels = self.channel_store
+            .list_active()
             .await
             .map_err(|e| ChannelRecallError(format!("Failed to list channels: {e}")))?;
 
         let entries: Vec<ChannelListEntry> = channels.iter().map(|channel| {
             ChannelListEntry {
-                channel_id: channel.channel_id.clone(),
-                channel_name: channel.channel_name.clone(),
-                message_count: channel.message_count,
-                last_activity: channel.last_activity.to_rfc3339(),
+                channel_id: channel.id.clone(),
+                channel_name: channel.display_name.clone(),
+                last_activity: channel.last_activity_at.to_rfc3339(),
             }
         }).collect();
 
@@ -230,10 +224,9 @@ fn format_channel_list(channels: &[ChannelListEntry]) -> String {
     for (i, channel) in channels.iter().enumerate() {
         let name = channel.channel_name.as_deref().unwrap_or("unnamed");
         output.push_str(&format!(
-            "{}. **#{}** — {} messages, last active: {}\n   ID: `{}`\n\n",
+            "{}. **#{}** — last active: {}\n   ID: `{}`\n\n",
             i + 1,
             name,
-            channel.message_count,
             channel.last_activity,
             channel.channel_id,
         ));

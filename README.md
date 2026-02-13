@@ -207,7 +207,11 @@ agent = "my-agent"
 ```
 
 ```bash
-cargo run --release
+spacebot                      # start as background daemon
+spacebot start --foreground   # or run in the foreground
+spacebot stop                 # graceful shutdown
+spacebot restart              # stop + start
+spacebot status               # show pid and uptime
 ```
 
 The binary creates all databases and directories automatically on first run. See the [quickstart guide](docs/quickstart.md) for more detail.
@@ -243,6 +247,7 @@ spacebot/
 │   ├── main.rs              # CLI entry, config loading, startup
 │   ├── lib.rs               # Re-exports, shared types
 │   ├── config.rs            # Configuration loading/validation
+│   ├── daemon.rs            # Background daemonization, IPC, PID management
 │   ├── error.rs             # Top-level error types
 │   ├── agent/               # Channel, branch, worker, compactor, cortex
 │   ├── hooks/               # PromptHook implementations
@@ -270,6 +275,7 @@ spacebot/
 | Doc | Description |
 |-----|-------------|
 | [Quick Start](docs/quickstart.md) | Setup, config, first run |
+| [Daemon](docs/daemon.md) | Background operation, IPC, logging |
 | [Config Reference](docs/config.md) | Full `config.toml` reference |
 | [Agents](docs/agents.md) | Multi-agent setup and isolation |
 | [Memory](docs/memory.md) | Memory system design |

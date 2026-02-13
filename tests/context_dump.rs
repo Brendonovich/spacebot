@@ -191,6 +191,7 @@ async fn dump_channel_context() {
 
     // Build the actual channel tool server with real tools registered
     let conversation_logger = spacebot::conversation::ConversationLogger::new(deps.sqlite_pool.clone());
+    let channel_store = spacebot::conversation::ChannelStore::new(deps.sqlite_pool.clone());
     let channel_id: spacebot::ChannelId = Arc::from("test-channel");
     let status_block = Arc::new(tokio::sync::RwLock::new(spacebot::agent::status::StatusBlock::new()));
     let (response_tx, _response_rx) = tokio::sync::mpsc::channel(16);
@@ -204,6 +205,7 @@ async fn dump_channel_context() {
         status_block,
         deps: deps.clone(),
         conversation_logger,
+        channel_store,
         screenshot_dir: std::path::PathBuf::from("/tmp/screenshots"),
         logs_dir: std::path::PathBuf::from("/tmp/logs"),
     };
@@ -258,9 +260,11 @@ async fn dump_branch_context() {
 
     // Build the actual branch tool server
     let conversation_logger = spacebot::conversation::ConversationLogger::new(deps.sqlite_pool.clone());
+    let channel_store = spacebot::conversation::ChannelStore::new(deps.sqlite_pool.clone());
     let branch_tool_server = spacebot::tools::create_branch_tool_server(
         deps.memory_search.clone(),
         conversation_logger,
+        channel_store,
     );
 
     let tool_defs = branch_tool_server
@@ -359,6 +363,7 @@ async fn dump_all_contexts() {
     }
 
     let conversation_logger = spacebot::conversation::ConversationLogger::new(deps.sqlite_pool.clone());
+    let channel_store = spacebot::conversation::ChannelStore::new(deps.sqlite_pool.clone());
 
     // ── Channel ──
     let channel_prompt = build_channel_system_prompt(rc);
@@ -374,6 +379,7 @@ async fn dump_all_contexts() {
         status_block: Arc::new(tokio::sync::RwLock::new(spacebot::agent::status::StatusBlock::new())),
         deps: deps.clone(),
         conversation_logger: conversation_logger.clone(),
+        channel_store: channel_store.clone(),
         screenshot_dir: std::path::PathBuf::from("/tmp/screenshots"),
         logs_dir: std::path::PathBuf::from("/tmp/logs"),
     };
@@ -396,6 +402,7 @@ async fn dump_all_contexts() {
     let branch_tool_server = spacebot::tools::create_branch_tool_server(
         deps.memory_search.clone(),
         conversation_logger,
+        channel_store,
     );
     let branch_tool_defs = branch_tool_server.get_tool_defs(None).await.unwrap();
     let branch_tools_text = format_tool_defs(&branch_tool_defs);

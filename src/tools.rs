@@ -127,12 +127,13 @@ pub async fn remove_channel_tools(
 pub fn create_branch_tool_server(
     memory_search: Arc<MemorySearch>,
     conversation_logger: crate::conversation::history::ConversationLogger,
+    channel_store: crate::conversation::ChannelStore,
 ) -> ToolServerHandle {
     ToolServer::new()
         .tool(MemorySaveTool::new(memory_search.clone()))
         .tool(MemoryRecallTool::new(memory_search.clone()))
         .tool(MemoryDeleteTool::new(memory_search))
-        .tool(ChannelRecallTool::new(conversation_logger))
+        .tool(ChannelRecallTool::new(conversation_logger, channel_store))
         .run()
 }
 

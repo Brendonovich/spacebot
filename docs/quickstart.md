@@ -150,6 +150,10 @@ On first run, Spacebot creates the agent directory structure:
 ```
 ~/.spacebot/
 ├── config.toml
+├── spacebot.pid              # daemon PID (when running in background)
+├── spacebot.sock             # IPC socket (when running in background)
+├── logs/                     # daemon logs (daily rotation)
+│   └── spacebot.log
 ├── agents/
 │   └── main/
 │       ├── workspace/
@@ -244,6 +248,7 @@ Spacebot is in active development. The foundation is built (config, databases, m
 ## Reference Docs
 
 - [docs/roadmap.md](roadmap.md) — build phases and progress
+- [docs/daemon.md](daemon.md) — background operation, logging, IPC
 - [docs/discord-setup.md](discord-setup.md) — Discord bot setup
 - [docs/agents.md](agents.md) — multi-agent system
 - [docs/routing.md](routing.md) — model routing and fallbacks

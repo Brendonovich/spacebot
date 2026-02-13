@@ -3,7 +3,7 @@
 use crate::agent::compactor::Compactor;
 use crate::error::{AgentError, Result};
 use crate::llm::SpacebotModel;
-use crate::conversation::ConversationLogger;
+use crate::conversation::{ChannelStore, ConversationLogger};
 use crate::{ChannelId, WorkerId, BranchId, ProcessId, ProcessType, AgentDeps, InboundMessage, ProcessEvent, OutboundResponse};
 use crate::hooks::SpacebotHook;
 use crate::agent::status::StatusBlock;
@@ -36,6 +36,7 @@ pub struct ChannelState {
     pub status_block: Arc<RwLock<StatusBlock>>,
     pub deps: AgentDeps,
     pub conversation_logger: ConversationLogger,
+    pub channel_store: ChannelStore,
     pub screenshot_dir: std::path::PathBuf,
     pub logs_dir: std::path::PathBuf,
 }
@@ -100,6 +101,7 @@ impl Channel {
         let (message_tx, message_rx) = mpsc::channel(64);
 
         let conversation_logger = ConversationLogger::new(deps.sqlite_pool.clone());
+        let channel_store = ChannelStore::new(deps.sqlite_pool.clone());
 
         let compactor = Compactor::new(
             id.clone(),
@@ -116,6 +118,7 @@ impl Channel {
             status_block: status_block.clone(),
             deps: deps.clone(),
             conversation_logger,
+            channel_store,
             screenshot_dir,
             logs_dir,
         };
@@ -213,6 +216,10 @@ impl Channel {
                 sender_name,
                 &message.sender_id,
                 &raw_text,
+                &message.metadata,
+            );
+            self.state.channel_store.upsert(
+                &message.conversation_id,
                 &message.metadata,
             );
         }
@@ -594,6 +601,7 @@ async fn spawn_branch(
     let tool_server = crate::tools::create_branch_tool_server(
         state.deps.memory_search.clone(),
         state.conversation_logger.clone(),
+        state.channel_store.clone(),
     );
     let branch_max_turns = **state.deps.runtime_config.branch_max_turns.load();
 
