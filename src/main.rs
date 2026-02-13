@@ -2,24 +2,47 @@
 
 use anyhow::Context as _;
 use arc_swap::ArcSwap;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use futures::StreamExt as _;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(name = "spacebot")]
 #[command(about = "A Rust agentic system with dedicated processes for every task")]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Path to config file (optional)
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     config: Option<std::path::PathBuf>,
 
     /// Enable debug logging
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     debug: bool,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Start the daemon (default when no subcommand is given)
+    Start {
+        /// Run in the foreground instead of daemonizing
+        #[arg(short, long)]
+        foreground: bool,
+    },
+    /// Stop the running daemon
+    Stop,
+    /// Restart the daemon (stop + start)
+    Restart {
+        /// Run in the foreground instead of daemonizing
+        #[arg(short, long)]
+        foreground: bool,
+    },
+    /// Show status of the running daemon
+    Status,
 }
 
 /// Tracks an active conversation channel and its message sender.
@@ -29,37 +52,195 @@ struct ActiveChannel {
     _outbound_handle: tokio::task::JoinHandle<()>,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let command = cli.command.unwrap_or(Command::Start { foreground: false });
 
-    let filter = if cli.debug {
-        EnvFilter::new("debug")
+    match command {
+        Command::Start { foreground } => cmd_start(cli.config, cli.debug, foreground),
+        Command::Stop => cmd_stop(),
+        Command::Restart { foreground } => {
+            cmd_stop_if_running();
+            cmd_start(cli.config, cli.debug, foreground)
+        }
+        Command::Status => cmd_status(),
+    }
+}
+
+fn cmd_start(
+    config_path: Option<std::path::PathBuf>,
+    debug: bool,
+    foreground: bool,
+) -> anyhow::Result<()> {
+    let paths = spacebot::daemon::DaemonPaths::from_default();
+
+    // Bail if already running
+    if let Some(pid) = spacebot::daemon::is_running(&paths) {
+        eprintln!("spacebot is already running (pid {pid})");
+        std::process::exit(1);
+    }
+
+    // Run onboarding interactively before daemonizing
+    let resolved_config_path = if config_path.is_some() {
+        config_path.clone()
+    } else if spacebot::config::Config::needs_onboarding() {
+        let path = spacebot::config::run_onboarding()
+            .with_context(|| "onboarding failed")?;
+        Some(path)
     } else {
-        EnvFilter::new("info")
+        None
     };
 
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .init();
+    // Validate config loads successfully before forking
+    let config = load_config(&resolved_config_path)?;
 
-    tracing::info!("starting spacebot");
+    if foreground {
+        spacebot::daemon::init_foreground_tracing(debug);
+    } else {
+        // Derive paths from the loaded config's instance dir
+        let paths = spacebot::daemon::DaemonPaths::new(&config.instance_dir);
+        spacebot::daemon::daemonize(&paths)?;
+        spacebot::daemon::init_background_tracing(&paths, debug);
+    }
 
-    // Load configuration, running onboarding on first launch
-    let config = if let Some(config_path) = cli.config {
-        spacebot::config::Config::load_from_path(&config_path)
-            .with_context(|| format!("failed to load config from {}", config_path.display()))?
-    } else if spacebot::config::Config::needs_onboarding() {
-        let config_path = spacebot::config::run_onboarding()
-            .with_context(|| "onboarding failed")?;
-        spacebot::config::Config::load_from_path(&config_path)
-            .with_context(|| "failed to load newly created configuration")?
+    // Build and run the tokio runtime for the async main
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to build tokio runtime")?
+        .block_on(run(config, foreground))
+}
+
+fn cmd_stop() -> anyhow::Result<()> {
+    let paths = spacebot::daemon::DaemonPaths::from_default();
+
+    let Some(pid) = spacebot::daemon::is_running(&paths) else {
+        eprintln!("spacebot is not running");
+        std::process::exit(1);
+    };
+
+    // Use a small runtime for the IPC call
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build tokio runtime")?;
+
+    runtime.block_on(async {
+        match spacebot::daemon::send_command(&paths, spacebot::daemon::IpcCommand::Shutdown).await {
+            Ok(spacebot::daemon::IpcResponse::Ok) => {
+                eprintln!("stopping spacebot (pid {pid})...");
+            }
+            Ok(spacebot::daemon::IpcResponse::Error { message }) => {
+                eprintln!("shutdown failed: {message}");
+                std::process::exit(1);
+            }
+            Ok(_) => {
+                eprintln!("unexpected response from daemon");
+                std::process::exit(1);
+            }
+            Err(error) => {
+                eprintln!("failed to send shutdown command: {error}");
+                std::process::exit(1);
+            }
+        }
+    });
+
+    if spacebot::daemon::wait_for_exit(pid) {
+        eprintln!("spacebot stopped");
+    } else {
+        eprintln!("spacebot did not stop within 10 seconds (pid {pid})");
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+/// Stop if running, don't error if not.
+fn cmd_stop_if_running() {
+    let paths = spacebot::daemon::DaemonPaths::from_default();
+
+    let Some(pid) = spacebot::daemon::is_running(&paths) else {
+        return;
+    };
+
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return;
+    };
+
+    runtime.block_on(async {
+        if let Ok(spacebot::daemon::IpcResponse::Ok) =
+            spacebot::daemon::send_command(&paths, spacebot::daemon::IpcCommand::Shutdown).await
+        {
+            eprintln!("stopping spacebot (pid {pid})...");
+            spacebot::daemon::wait_for_exit(pid);
+        }
+    });
+}
+
+fn cmd_status() -> anyhow::Result<()> {
+    let paths = spacebot::daemon::DaemonPaths::from_default();
+
+    let Some(_pid) = spacebot::daemon::is_running(&paths) else {
+        eprintln!("spacebot is not running");
+        std::process::exit(1);
+    };
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build tokio runtime")?;
+
+    runtime.block_on(async {
+        match spacebot::daemon::send_command(&paths, spacebot::daemon::IpcCommand::Status).await {
+            Ok(spacebot::daemon::IpcResponse::Status { pid, uptime_seconds }) => {
+                let hours = uptime_seconds / 3600;
+                let minutes = (uptime_seconds % 3600) / 60;
+                let seconds = uptime_seconds % 60;
+                eprintln!("spacebot is running");
+                eprintln!("  pid:    {pid}");
+                eprintln!("  uptime: {hours}h {minutes}m {seconds}s");
+            }
+            Ok(spacebot::daemon::IpcResponse::Error { message }) => {
+                eprintln!("status query failed: {message}");
+                std::process::exit(1);
+            }
+            Ok(_) => {
+                eprintln!("unexpected response from daemon");
+                std::process::exit(1);
+            }
+            Err(error) => {
+                eprintln!("failed to query daemon status: {error}");
+                std::process::exit(1);
+            }
+        }
+    });
+
+    Ok(())
+}
+
+fn load_config(config_path: &Option<std::path::PathBuf>) -> anyhow::Result<spacebot::config::Config> {
+    if let Some(path) = config_path {
+        spacebot::config::Config::load_from_path(path)
+            .with_context(|| format!("failed to load config from {}", path.display()))
     } else {
         spacebot::config::Config::load()
-            .with_context(|| "failed to load configuration")?
-    };
+            .with_context(|| "failed to load configuration")
+    }
+}
 
+async fn run(config: spacebot::config::Config, foreground: bool) -> anyhow::Result<()> {
+    let paths = spacebot::daemon::DaemonPaths::new(&config.instance_dir);
+
+    tracing::info!("starting spacebot");
     tracing::info!(instance_dir = %config.instance_dir.display(), "configuration loaded");
+
+    // Start the IPC server for stop/status commands
+    let (mut shutdown_rx, _ipc_handle) = spacebot::daemon::start_ipc_server(&paths)
+        .await
+        .context("failed to start IPC server")?;
 
     // Shared LLM manager (same API keys for all agents)
     let llm_manager = Arc::new(
@@ -322,6 +503,12 @@ async fn main() -> anyhow::Result<()> {
         bindings.clone(),
     );
 
+    if foreground {
+        eprintln!("spacebot running in foreground (pid {})", std::process::id());
+    } else {
+        tracing::info!(pid = std::process::id(), "spacebot daemon started");
+    }
+
     // Active conversation channels: conversation_id -> ActiveChannel
     let mut active_channels: HashMap<String, ActiveChannel> = HashMap::new();
 
@@ -460,6 +647,10 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
+            _ = shutdown_rx.wait_for(|shutdown| *shutdown) => {
+                tracing::info!("shutdown signal received via IPC");
+                break;
+            }
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("shutdown signal received");
                 break;
@@ -483,6 +674,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     tracing::info!("spacebot stopped");
+
+    spacebot::daemon::cleanup(&paths);
 
     // Force exit — detached tasks (e.g. the serenity gateway client) may keep
     // the tokio runtime alive after all owned resources have been cleaned up.

@@ -369,3 +369,4 @@ These are validated patterns from research (see `docs/research/pattern-analysis.
 - `docs/research/pattern-analysis.md` — patterns to adopt/adapt/skip
 - `docs/messaging.md` — messaging system design (Discord, Telegram, webhook)
 - `docs/routing.md` — model routing design (process-type defaults, task-type overrides, fallbacks)
+- `docs/daemon.md` — daemon mode, IPC, CLI subcommands

@@ -36,6 +36,7 @@ base64 = "0.22"
 # Logging and tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 
 # Configuration
 dirs = "6.0"
@@ -67,6 +68,10 @@ schemars = "0.8"
 # Command line (for main.rs)
 clap = { version = "4.5", features = ["derive"] }
 dialoguer = { version = "0.11", features = ["password"] }
+
+# Daemonization
+daemonize = "0.5"
+libc = "0.2"
 
 # Discord
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "cache", "chrono", "rustls_backend"] }

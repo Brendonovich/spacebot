@@ -121,17 +121,29 @@ Fallback chains handle rate limits and outages:
 spacebot
 ```
 
-Or with a specific config path:
+This starts Spacebot as a background daemon. Use `--foreground` to keep it attached to the terminal:
+
+```bash
+spacebot start --foreground
+```
+
+Other commands:
+
+```bash
+spacebot stop               # graceful shutdown
+spacebot restart             # stop + start
+spacebot status              # show pid and uptime
+```
+
+With a specific config path or debug logging:
 
 ```bash
 spacebot --config /path/to/config.toml
-```
-
-Debug logging:
-
-```bash
 spacebot --debug
+spacebot start -f -d        # foreground + debug (useful during development)
 ```
+
+See [docs/daemon.md](daemon.md) for details on background operation, logging, and the IPC protocol.
 
 On first run, Spacebot creates the agent directory structure:
 
