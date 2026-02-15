@@ -12,6 +12,7 @@ interface/dist/
 docs/
 tests/
 scripts/
+fly.toml
 AGENTS.md
 RUST_STYLE_GUIDE.md
 LICENSE

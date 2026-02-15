@@ -25,7 +25,7 @@ RUN mkdir src && echo "fn main() {}" > src/main.rs && touch src/lib.rs && cargo 
 
 # 2. Build the frontend.
 COPY interface/ interface/
-RUN cd interface && bun install && bun run build
+RUN cd interface && bun install && bun add -d @rollup/rollup-linux-x64-gnu && bun run build
 
 # 3. Copy source and compile the real binary.
 #    build.rs runs the frontend build (already done above, node_modules present).

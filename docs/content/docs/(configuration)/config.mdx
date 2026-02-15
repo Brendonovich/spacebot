@@ -100,6 +100,11 @@ enabled = true
 token = "env:DISCORD_BOT_TOKEN"
 dm_allowed_users = ["user_id_1", "user_id_2"]
 
+[messaging.telegram]
+enabled = true
+token = "env:TELEGRAM_BOT_TOKEN"
+dm_allowed_users = ["user_id_1"]
+
 [messaging.webhook]
 enabled = true
 port = 18789
@@ -360,6 +365,14 @@ Agent-specific routing is set via `[agents.routing]` with the same keys as `[def
 | `enabled` | bool | false | Enable Discord adapter |
 | `token` | string | None | Bot token (or `env:VAR_NAME`) |
 | `dm_allowed_users` | string[] | [] | User IDs allowed to DM the bot |
+
+### `[messaging.telegram]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | false | Enable Telegram adapter |
+| `token` | string | None | Bot token from @BotFather (or `env:VAR_NAME`). Falls back to `TELEGRAM_BOT_TOKEN` env var |
+| `dm_allowed_users` | string[] | [] | User IDs allowed to DM the bot. Empty = DMs from anyone accepted |
 
 ### `[messaging.webhook]`
 

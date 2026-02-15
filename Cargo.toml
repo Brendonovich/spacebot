@@ -82,6 +82,9 @@ async-trait = "0.1"
 # Slack
 slack-morphism = { version = "2.17", features = ["hyper"] }
 
+# Telegram
+teloxide = { version = "0.17", default-features = false, features = ["rustls"] }
+
 # Stream utilities
 tokio-stream = "0.1"
 

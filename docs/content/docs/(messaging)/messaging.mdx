@@ -525,7 +525,7 @@ This is configurable per-guild. Some channels might want threaded mode (support,
 
 ## Telegram Adapter
 
-Future implementation. Will use **teloxide** for the Telegram Bot API. Long polling mode for receiving updates, Telegram Bot API for sending/editing messages. Key differences from Discord: `sendChatAction("typing")` for typing indicators (expires after ~5s, repeat every 4s), `editMessageText` for streaming (rate-limited to ~1s intervals), bot must be mentioned in groups.
+Uses **teloxide** for the Telegram Bot API. Long polling mode for receiving updates, Telegram Bot API for sending/editing messages. Key differences from Discord: `sendChatAction("typing")` for typing indicators (expires after ~5s, repeated every 4s), `editMessageText` for streaming (rate-limited to ~1s intervals to avoid API throttling). Supports text messages, file attachments (documents, photos, video, audio, voice), reactions (limited to Telegram's available emoji set per chat), and reply threading via `ReplyParameters`. History backfill is not available via the Bot API — the conversation DB handles reconnect recovery.
 
 ## Webhook Adapter
 

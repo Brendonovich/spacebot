@@ -573,6 +573,7 @@ pub fn resolve_agent_for_message(
 pub struct MessagingConfig {
     pub discord: Option<DiscordConfig>,
     pub slack: Option<SlackConfig>,
+    pub telegram: Option<TelegramConfig>,
     pub webhook: Option<WebhookConfig>,
 }
 
@@ -724,6 +725,68 @@ impl DiscordPermissions {
             channel_filter,
             dm_allowed_users,
             allow_bot_messages: discord.allow_bot_messages,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TelegramConfig {
+    pub enabled: bool,
+    pub token: String,
+    /// User IDs allowed to DM the bot. If empty, DMs are ignored entirely.
+    pub dm_allowed_users: Vec<String>,
+}
+
+/// Hot-reloadable Telegram permission filters.
+///
+/// Shared with the Telegram adapter via `Arc<ArcSwap<..>>` for hot-reloading.
+#[derive(Debug, Clone, Default)]
+pub struct TelegramPermissions {
+    /// Allowed chat IDs (None = all chats accepted).
+    pub chat_filter: Option<Vec<i64>>,
+    /// User IDs allowed in private chats.
+    pub dm_allowed_users: Vec<i64>,
+}
+
+impl TelegramPermissions {
+    /// Build from the current config's telegram settings and bindings.
+    pub fn from_config(telegram: &TelegramConfig, bindings: &[Binding]) -> Self {
+        let telegram_bindings: Vec<&Binding> = bindings
+            .iter()
+            .filter(|b| b.channel == "telegram")
+            .collect();
+
+        let chat_filter = {
+            let chat_ids: Vec<i64> = telegram_bindings
+                .iter()
+                .filter_map(|b| b.chat_id.as_ref()?.parse::<i64>().ok())
+                .collect();
+            if chat_ids.is_empty() {
+                None
+            } else {
+                Some(chat_ids)
+            }
+        };
+
+        let mut dm_allowed_users: Vec<i64> = telegram
+            .dm_allowed_users
+            .iter()
+            .filter_map(|id| id.parse::<i64>().ok())
+            .collect();
+
+        for binding in &telegram_bindings {
+            for id in &binding.dm_allowed_users {
+                if let Ok(uid) = id.parse::<i64>() {
+                    if !dm_allowed_users.contains(&uid) {
+                        dm_allowed_users.push(uid);
+                    }
+                }
+            }
+        }
+
+        Self {
+            chat_filter,
+            dm_allowed_users,
         }
     }
 }
@@ -936,6 +999,7 @@ fn default_enabled() -> bool {
 struct TomlMessagingConfig {
     discord: Option<TomlDiscordConfig>,
     slack: Option<TomlSlackConfig>,
+    telegram: Option<TomlTelegramConfig>,
     webhook: Option<TomlWebhookConfig>,
 }
 
@@ -956,6 +1020,15 @@ struct TomlSlackConfig {
     enabled: bool,
     bot_token: Option<String>,
     app_token: Option<String>,
+    #[serde(default)]
+    dm_allowed_users: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct TomlTelegramConfig {
+    #[serde(default)]
+    enabled: bool,
+    token: Option<String>,
     #[serde(default)]
     dm_allowed_users: Vec<String>,
 }
@@ -1511,6 +1584,18 @@ impl Config {
                     dm_allowed_users: s.dm_allowed_users,
                 })
             }),
+            telegram: toml.messaging.telegram.and_then(|t| {
+                let token = t
+                    .token
+                    .as_deref()
+                    .and_then(resolve_env_value)
+                    .or_else(|| std::env::var("TELEGRAM_BOT_TOKEN").ok())?;
+                Some(TelegramConfig {
+                    enabled: t.enabled,
+                    token,
+                    dm_allowed_users: t.dm_allowed_users,
+                })
+            }),
             webhook: toml.messaging.webhook.map(|w| WebhookConfig {
                 enabled: w.enabled,
                 port: w.port,
@@ -1743,6 +1828,7 @@ pub fn spawn_file_watcher(
     agents: Vec<(String, PathBuf, Arc<RuntimeConfig>)>,
     discord_permissions: Option<Arc<arc_swap::ArcSwap<DiscordPermissions>>>,
     slack_permissions: Option<Arc<arc_swap::ArcSwap<SlackPermissions>>>,
+    telegram_permissions: Option<Arc<arc_swap::ArcSwap<TelegramPermissions>>>,
     bindings: Arc<arc_swap::ArcSwap<Vec<Binding>>>,
 ) -> tokio::task::JoinHandle<()> {
     use notify::{Event, RecursiveMode, Watcher};
@@ -1869,6 +1955,15 @@ pub fn spawn_file_watcher(
                             SlackPermissions::from_config(slack_config, &config.bindings);
                         perms.store(Arc::new(new_perms));
                         tracing::info!("slack permissions reloaded");
+                    }
+                }
+
+                if let Some(ref perms) = telegram_permissions {
+                    if let Some(telegram_config) = &config.messaging.telegram {
+                        let new_perms =
+                            TelegramPermissions::from_config(telegram_config, &config.bindings);
+                        perms.store(Arc::new(new_perms));
+                        tracing::info!("telegram permissions reloaded");
                     }
                 }
             }

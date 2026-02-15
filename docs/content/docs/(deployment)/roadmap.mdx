@@ -43,8 +43,8 @@ Tracking progress from first compile to public launch.
 - **Memory maintenance** — decay + prune implemented, merge stubbed (`merge_similar_memories()` is a no-op)
 - **RouteTool follow-ups** — validates worker exists and returns success, but never delivers the message — `input_tx` dropped immediately after worker spawn
 - **Streaming** — `SpacebotModel.stream()` returns error, not implemented
-- **Telegram adapter** — empty struct, no `Messaging` impl
-- **Webhook adapter** — empty struct, no `Messaging` impl
+- ~~**Telegram adapter**~~ — implemented via teloxide
+- ~~**Webhook adapter**~~ — implemented with axum HTTP server
 - **Secrets store** — empty struct, no redb integration
 - **Settings store** — empty struct, no redb integration
 - **CortexHook** — all hook methods are trace-only passthrough, no observation logic
@@ -111,9 +111,9 @@ Drop files in, agent picks them up.
 
 ## Phase 14: Telegram Adapter
 
-- [ ] Implement TelegramAdapter via teloxide — long polling mode
-- [ ] Message handling, typing indicators, reply threading
-- [ ] Bindings support for `chat_id` routing
+- [x] Implement TelegramAdapter via teloxide — long polling mode
+- [x] Message handling, typing indicators, reply threading
+- [x] Bindings support for `chat_id` routing
 
 ## Phase 15: Launch Prep
 

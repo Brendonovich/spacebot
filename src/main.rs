@@ -336,6 +336,7 @@ async fn run(
         let mut watcher_agents = Vec::new();
         let mut discord_permissions = None;
         let mut slack_permissions = None;
+        let mut telegram_permissions = None;
         initialize_agents(
             &config,
             &llm_manager,
@@ -351,6 +352,7 @@ async fn run(
             &mut watcher_agents,
             &mut discord_permissions,
             &mut slack_permissions,
+            &mut telegram_permissions,
         )
         .await?;
         agents_initialized = true;
@@ -362,6 +364,7 @@ async fn run(
             watcher_agents,
             discord_permissions,
             slack_permissions,
+            telegram_permissions,
             bindings.clone(),
         );
     } else {
@@ -370,6 +373,7 @@ async fn run(
             config_path.clone(),
             config.instance_dir.clone(),
             Vec::new(),
+            None,
             None,
             None,
             bindings.clone(),
@@ -609,6 +613,7 @@ async fn run(
                                 let mut new_watcher_agents = Vec::new();
                                 let mut new_discord_permissions = None;
                                 let mut new_slack_permissions = None;
+                                let mut new_telegram_permissions = None;
                                 match initialize_agents(
                                     &new_config,
                                     &new_llm_manager,
@@ -624,6 +629,7 @@ async fn run(
                                     &mut new_watcher_agents,
                                     &mut new_discord_permissions,
                                     &mut new_slack_permissions,
+                                    &mut new_telegram_permissions,
                                 ).await {
                                     Ok(()) => {
                                         agents_initialized = true;
@@ -634,6 +640,7 @@ async fn run(
                                             new_watcher_agents,
                                             new_discord_permissions,
                                             new_slack_permissions,
+                                            new_telegram_permissions,
                                             bindings.clone(),
                                         );
                                         tracing::info!("agents initialized after provider setup");
@@ -711,6 +718,7 @@ async fn initialize_agents(
     watcher_agents: &mut Vec<(String, std::path::PathBuf, Arc<spacebot::config::RuntimeConfig>)>,
     discord_permissions: &mut Option<Arc<ArcSwap<spacebot::config::DiscordPermissions>>>,
     slack_permissions: &mut Option<Arc<ArcSwap<spacebot::config::SlackPermissions>>>,
+    telegram_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TelegramPermissions>>>,
 ) -> anyhow::Result<()> {
     let resolved_agents = config.resolve_agents();
 
@@ -889,6 +897,32 @@ async fn initialize_agents(
                 &slack_config.bot_token,
                 &slack_config.app_token,
                 slack_permissions.clone().expect("slack permissions initialized when slack is enabled"),
+            );
+            new_messaging_manager.register(adapter);
+        }
+    }
+
+    // Shared Telegram permissions (hot-reloadable via file watcher)
+    *telegram_permissions = config.messaging.telegram.as_ref().map(|telegram_config| {
+        let perms = spacebot::config::TelegramPermissions::from_config(telegram_config, &config.bindings);
+        Arc::new(ArcSwap::from_pointee(perms))
+    });
+
+    if let Some(telegram_config) = &config.messaging.telegram {
+        if telegram_config.enabled {
+            let adapter = spacebot::messaging::telegram::TelegramAdapter::new(
+                &telegram_config.token,
+                telegram_permissions.clone().expect("telegram permissions initialized when telegram is enabled"),
+            );
+            new_messaging_manager.register(adapter);
+        }
+    }
+
+    if let Some(webhook_config) = &config.messaging.webhook {
+        if webhook_config.enabled {
+            let adapter = spacebot::messaging::webhook::WebhookAdapter::new(
+                webhook_config.port,
+                &webhook_config.bind,
             );
             new_messaging_manager.register(adapter);
         }
