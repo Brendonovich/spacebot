@@ -64,8 +64,8 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:${{ steps.version.outputs.version }}-slim-${{ matrix.arch }}
             ${{ env.IMAGE }}:slim-${{ matrix.arch }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=release-${{ matrix.arch }}-slim
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.arch }}-slim
 
       - name: Build and push full
         uses: docker/build-push-action@v6
@@ -77,8 +77,8 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:${{ steps.version.outputs.version }}-full-${{ matrix.arch }}
             ${{ env.IMAGE }}:full-${{ matrix.arch }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=release-${{ matrix.arch }}-full
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.arch }}-full
 
   publish-manifests:
     runs-on: ubuntu-latest
