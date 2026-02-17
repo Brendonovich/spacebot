@@ -8,7 +8,7 @@ import {ProviderIcon} from "@/lib/providerIcons";
 import {TagInput} from "@/components/TagInput";
 import {parse as parseToml} from "smol-toml";
 
-type SectionId = "providers" | "channels" | "api-keys" | "server" | "worker-logs" | "config-file";
+type SectionId = "providers" | "channels" | "bindings" | "api-keys" | "server" | "worker-logs" | "config-file";
 
 const SECTIONS = [
 	{
@@ -21,7 +21,13 @@ const SECTIONS = [
 		id: "channels" as const,
 		label: "Channels",
 		group: "messaging" as const,
-		description: "Messaging platforms and bindings",
+		description: "Messaging platform credentials",
+	},
+	{
+		id: "bindings" as const,
+		label: "Bindings",
+		group: "messaging" as const,
+		description: "Route conversations to agents",
 	},
 	{
 		id: "api-keys" as const,
@@ -316,6 +322,8 @@ export function Settings() {
 					</div>
 					) : activeSection === "channels" ? (
 						<ChannelsSection />
+					) : activeSection === "bindings" ? (
+						<BindingsSection />
 					) : activeSection === "api-keys" ? (
 						<ApiKeysSection settings={globalSettings} isLoading={globalSettingsLoading} />
 					) : activeSection === "server" ? (
@@ -380,17 +388,6 @@ function ChannelsSection() {
 	const queryClient = useQueryClient();
 	const [editingPlatform, setEditingPlatform] = useState<"discord" | "slack" | "telegram" | "webhook" | null>(null);
 	const [platformInputs, setPlatformInputs] = useState<Record<string, string>>({});
-	const [addingBinding, setAddingBinding] = useState(false);
-	const [editingBinding, setEditingBinding] = useState<BindingInfo | null>(null);
-	const [bindingForm, setBindingForm] = useState({
-		agent_id: "main",
-		channel: "discord" as "discord" | "slack" | "telegram" | "webhook",
-		guild_id: "",
-		workspace_id: "",
-		chat_id: "",
-		channel_ids: [] as string[],
-		dm_allowed_users: [] as string[],
-	});
 	const [message, setMessage] = useState<{
 		text: string;
 		type: "success" | "error";
@@ -400,18 +397,6 @@ function ChannelsSection() {
 		queryKey: ["messaging-status"],
 		queryFn: api.messagingStatus,
 		staleTime: 5_000,
-	});
-
-	const {data: bindingsData, isLoading: bindingsLoading} = useQuery({
-		queryKey: ["bindings"],
-		queryFn: () => api.bindings(),
-		staleTime: 5_000,
-	});
-
-	const {data: agentsData} = useQuery({
-		queryKey: ["agents"],
-		queryFn: api.agents,
-		staleTime: 10_000,
 	});
 
 	const createPlatformMutation = useMutation({
@@ -432,72 +417,7 @@ function ChannelsSection() {
 		},
 	});
 
-	const addBindingMutation = useMutation({
-		mutationFn: api.createBinding,
-		onSuccess: (result) => {
-			if (result.success) {
-				setAddingBinding(false);
-				setBindingForm({
-					agent_id: "main",
-					channel: "discord",
-					guild_id: "",
-					workspace_id: "",
-					chat_id: "",
-					channel_ids: [],
-					dm_allowed_users: [],
-				});
-				setMessage({text: result.message, type: "success"});
-				queryClient.invalidateQueries({queryKey: ["bindings"]});
-			} else {
-				setMessage({text: result.message, type: "error"});
-			}
-		},
-		onError: (error) => {
-			setMessage({text: `Failed: ${error.message}`, type: "error"});
-		},
-	});
-
-	const updateBindingMutation = useMutation({
-		mutationFn: api.updateBinding,
-		onSuccess: (result) => {
-			if (result.success) {
-				setEditingBinding(null);
-				setBindingForm({
-					agent_id: "main",
-					channel: "discord",
-					guild_id: "",
-					workspace_id: "",
-					chat_id: "",
-					channel_ids: [],
-					dm_allowed_users: [],
-				});
-				setMessage({text: result.message, type: "success"});
-				queryClient.invalidateQueries({queryKey: ["bindings"]});
-			} else {
-				setMessage({text: result.message, type: "error"});
-			}
-		},
-		onError: (error) => {
-			setMessage({text: `Failed: ${error.message}`, type: "error"});
-		},
-	});
-
-	const deleteBindingMutation = useMutation({
-		mutationFn: api.deleteBinding,
-		onSuccess: (result) => {
-			if (result.success) {
-				setMessage({text: result.message, type: "success"});
-				queryClient.invalidateQueries({queryKey: ["bindings"]});
-			} else {
-				setMessage({text: result.message, type: "error"});
-			}
-		},
-		onError: (error) => {
-			setMessage({text: `Failed: ${error.message}`, type: "error"});
-		},
-	});
-
-	const isLoading = statusLoading || bindingsLoading;
+	const isLoading = statusLoading;
 
 	const handleClose = () => {
 		setEditingPlatform(null);
@@ -534,91 +454,7 @@ function ChannelsSection() {
 		createPlatformMutation.mutate(request);
 	};
 
-	const handleAddBinding = () => {
-		const request: any = {
-			agent_id: bindingForm.agent_id,
-			channel: bindingForm.channel,
-		};
 
-		// Add platform-specific filters
-		if (bindingForm.channel === "discord" && bindingForm.guild_id.trim()) {
-			request.guild_id = bindingForm.guild_id.trim();
-		}
-		if (bindingForm.channel === "slack" && bindingForm.workspace_id.trim()) {
-			request.workspace_id = bindingForm.workspace_id.trim();
-		}
-		if (bindingForm.channel === "telegram" && bindingForm.chat_id.trim()) {
-			request.chat_id = bindingForm.chat_id.trim();
-		}
-
-		// Add arrays
-		if (bindingForm.channel_ids.length > 0) {
-			request.channel_ids = bindingForm.channel_ids;
-		}
-
-		if (bindingForm.dm_allowed_users.length > 0) {
-			request.dm_allowed_users = bindingForm.dm_allowed_users;
-		}
-
-		addBindingMutation.mutate(request);
-	};
-
-	const handleEditBinding = (binding: BindingInfo) => {
-		setEditingBinding(binding);
-		setBindingForm({
-			agent_id: binding.agent_id,
-			channel: binding.channel as any,
-			guild_id: binding.guild_id || "",
-			workspace_id: binding.workspace_id || "",
-			chat_id: binding.chat_id || "",
-			channel_ids: binding.channel_ids,
-			dm_allowed_users: binding.dm_allowed_users,
-		});
-	};
-
-	const handleUpdateBinding = () => {
-		if (!editingBinding) return;
-
-		const request: any = {
-			original_agent_id: editingBinding.agent_id,
-			original_channel: editingBinding.channel,
-			original_guild_id: editingBinding.guild_id || undefined,
-			original_workspace_id: editingBinding.workspace_id || undefined,
-			original_chat_id: editingBinding.chat_id || undefined,
-			agent_id: bindingForm.agent_id,
-			channel: bindingForm.channel,
-		};
-
-		// Add platform-specific filters
-		if (bindingForm.channel === "discord" && bindingForm.guild_id.trim()) {
-			request.guild_id = bindingForm.guild_id.trim();
-		}
-		if (bindingForm.channel === "slack" && bindingForm.workspace_id.trim()) {
-			request.workspace_id = bindingForm.workspace_id.trim();
-		}
-		if (bindingForm.channel === "telegram" && bindingForm.chat_id.trim()) {
-			request.chat_id = bindingForm.chat_id.trim();
-		}
-
-		// Add arrays (empty arrays are valid - they clear the field)
-		request.channel_ids = bindingForm.channel_ids;
-		request.dm_allowed_users = bindingForm.dm_allowed_users;
-
-		updateBindingMutation.mutate(request);
-	};
-
-	const handleDeleteBinding = (binding: any) => {
-		const request: any = {
-			agent_id: binding.agent_id,
-			channel: binding.channel,
-		};
-
-		if (binding.guild_id) request.guild_id = binding.guild_id;
-		if (binding.workspace_id) request.workspace_id = binding.workspace_id;
-		if (binding.chat_id) request.chat_id = binding.chat_id;
-
-		deleteBindingMutation.mutate(request);
-	};
 
 	return (
 		<div className="mx-auto max-w-2xl px-6 py-6">
@@ -628,7 +464,7 @@ function ChannelsSection() {
 					Messaging Platforms
 				</h2>
 				<p className="mt-1 text-sm text-ink-dull">
-					Configure messaging platform credentials and bindings. Bindings route conversations from specific servers/channels to agents.
+					Configure messaging platform credentials. Once enabled, create bindings to route conversations to agents.
 				</p>
 			</div>
 
@@ -730,98 +566,6 @@ function ChannelsSection() {
 							disabled
 						/>
 					</div>
-
-					{/* Bindings Table */}
-					<div className="mt-8">
-						<div className="mb-4 flex items-center justify-between">
-							<h2 className="font-plex text-sm font-semibold text-ink">Bindings</h2>
-							<Button
-								size="sm"
-								variant="outline"
-								onClick={() => {
-									setAddingBinding(true);
-									setEditingBinding(null);
-									setBindingForm({
-										agent_id: agentsData?.agents?.[0]?.id ?? "main",
-										channel: "discord",
-										guild_id: "",
-										workspace_id: "",
-										chat_id: "",
-										channel_ids: [],
-										dm_allowed_users: [],
-									});
-									setMessage(null);
-								}}
-							>
-								Add Binding
-							</Button>
-						</div>
-
-						{bindingsData?.bindings && bindingsData.bindings.length > 0 ? (
-							<div className="rounded-lg border border-app-line bg-app-box">
-								{bindingsData.bindings.map((binding, idx) => (
-									<div
-										key={idx}
-										className="flex items-center gap-3 border-b border-app-line/50 px-4 py-3 last:border-b-0"
-									>
-										<PlatformIcon platform={binding.channel} size="1x" className="text-ink-faint" />
-										<div className="flex-1">
-											<div className="flex items-center gap-2">
-												<span className="text-sm font-medium text-ink">
-													{binding.agent_id}
-												</span>
-												<span className="text-sm text-ink-faint">→</span>
-												<span className="text-sm text-ink-dull">
-													{binding.channel}
-												</span>
-											</div>
-											<div className="mt-1 flex items-center gap-2 text-tiny text-ink-faint">
-												{binding.guild_id && (
-													<span>Guild: {binding.guild_id}</span>
-												)}
-												{binding.workspace_id && (
-													<span>Workspace: {binding.workspace_id}</span>
-												)}
-												{binding.chat_id && (
-													<span>Chat: {binding.chat_id}</span>
-												)}
-												{binding.channel_ids.length > 0 && (
-													<span>Channels: {binding.channel_ids.length}</span>
-												)}
-												{binding.dm_allowed_users.length > 0 && (
-													<span>DM Users: {binding.dm_allowed_users.length}</span>
-												)}
-											</div>
-										</div>
-										<div className="flex items-center gap-2">
-											<Button 
-												size="sm" 
-												variant="ghost"
-												onClick={() => handleEditBinding(binding)}
-											>
-												Edit
-											</Button>
-											<Button 
-												size="sm" 
-												variant="ghost"
-												onClick={() => handleDeleteBinding(binding)}
-												loading={deleteBindingMutation.isPending}
-											>
-												Remove
-											</Button>
-										</div>
-									</div>
-								))}
-							</div>
-						) : (
-							<div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-app-line/50 bg-app-darkBox/20 py-12">
-								<p className="text-sm text-ink-faint">No bindings configured</p>
-								<p className="mt-1 text-tiny text-ink-faint/70">
-									Add a binding to route messages to an agent
-								</p>
-							</div>
-						)}
-					</div>
 				</>
 			)}
 
@@ -832,7 +576,7 @@ function ChannelsSection() {
 					<code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">
 						config.toml
 					</code>
-					. Bindings route conversations from specific platforms/servers to agents. The first matching binding wins.
+					. Once configured, go to the Bindings tab to route conversations to agents.
 				</p>
 			</div>
 
@@ -972,8 +716,313 @@ function ChannelsSection() {
 					</DialogFooter>
 				</DialogContent>
 			</Dialog>
+		</div>
+	);
+}
 
-			{/* Add/Edit Binding Modal */}
+function BindingsSection() {
+	const queryClient = useQueryClient();
+	const [addingBinding, setAddingBinding] = useState(false);
+	const [editingBinding, setEditingBinding] = useState<BindingInfo | null>(null);
+	const [bindingForm, setBindingForm] = useState({
+		agent_id: "main",
+		channel: "discord" as "discord" | "slack" | "telegram" | "webhook",
+		guild_id: "",
+		workspace_id: "",
+		chat_id: "",
+		channel_ids: [] as string[],
+		dm_allowed_users: [] as string[],
+	});
+	const [message, setMessage] = useState<{
+		text: string;
+		type: "success" | "error";
+	} | null>(null);
+
+	const {data: bindingsData, isLoading: bindingsLoading} = useQuery({
+		queryKey: ["bindings"],
+		queryFn: () => api.bindings(),
+		staleTime: 5_000,
+	});
+
+	const {data: agentsData} = useQuery({
+		queryKey: ["agents"],
+		queryFn: api.agents,
+		staleTime: 10_000,
+	});
+
+	const addBindingMutation = useMutation({
+		mutationFn: api.createBinding,
+		onSuccess: (result) => {
+			if (result.success) {
+				setAddingBinding(false);
+				setBindingForm({
+					agent_id: "main",
+					channel: "discord",
+					guild_id: "",
+					workspace_id: "",
+					chat_id: "",
+					channel_ids: [],
+					dm_allowed_users: [],
+				});
+				setMessage({text: result.message, type: "success"});
+				queryClient.invalidateQueries({queryKey: ["bindings"]});
+			} else {
+				setMessage({text: result.message, type: "error"});
+			}
+		},
+		onError: (error) => {
+			setMessage({text: `Failed: ${error.message}`, type: "error"});
+		},
+	});
+
+	const updateBindingMutation = useMutation({
+		mutationFn: api.updateBinding,
+		onSuccess: (result) => {
+			if (result.success) {
+				setEditingBinding(null);
+				setBindingForm({
+					agent_id: "main",
+					channel: "discord",
+					guild_id: "",
+					workspace_id: "",
+					chat_id: "",
+					channel_ids: [],
+					dm_allowed_users: [],
+				});
+				setMessage({text: result.message, type: "success"});
+				queryClient.invalidateQueries({queryKey: ["bindings"]});
+			} else {
+				setMessage({text: result.message, type: "error"});
+			}
+		},
+		onError: (error) => {
+			setMessage({text: `Failed: ${error.message}`, type: "error"});
+		},
+	});
+
+	const deleteBindingMutation = useMutation({
+		mutationFn: api.deleteBinding,
+		onSuccess: (result) => {
+			if (result.success) {
+				setMessage({text: result.message, type: "success"});
+				queryClient.invalidateQueries({queryKey: ["bindings"]});
+			} else {
+				setMessage({text: result.message, type: "error"});
+			}
+		},
+		onError: (error) => {
+			setMessage({text: `Failed: ${error.message}`, type: "error"});
+		},
+	});
+
+	const handleAddBinding = () => {
+		const request: any = {
+			agent_id: bindingForm.agent_id,
+			channel: bindingForm.channel,
+		};
+
+		if (bindingForm.channel === "discord" && bindingForm.guild_id.trim()) {
+			request.guild_id = bindingForm.guild_id.trim();
+		}
+		if (bindingForm.channel === "slack" && bindingForm.workspace_id.trim()) {
+			request.workspace_id = bindingForm.workspace_id.trim();
+		}
+		if (bindingForm.channel === "telegram" && bindingForm.chat_id.trim()) {
+			request.chat_id = bindingForm.chat_id.trim();
+		}
+
+		if (bindingForm.channel_ids.length > 0) {
+			request.channel_ids = bindingForm.channel_ids;
+		}
+
+		if (bindingForm.dm_allowed_users.length > 0) {
+			request.dm_allowed_users = bindingForm.dm_allowed_users;
+		}
+
+		addBindingMutation.mutate(request);
+	};
+
+	const handleEditBinding = (binding: BindingInfo) => {
+		setEditingBinding(binding);
+		setBindingForm({
+			agent_id: binding.agent_id,
+			channel: binding.channel as any,
+			guild_id: binding.guild_id || "",
+			workspace_id: binding.workspace_id || "",
+			chat_id: binding.chat_id || "",
+			channel_ids: binding.channel_ids,
+			dm_allowed_users: binding.dm_allowed_users,
+		});
+	};
+
+	const handleUpdateBinding = () => {
+		if (!editingBinding) return;
+
+		const request: any = {
+			original_agent_id: editingBinding.agent_id,
+			original_channel: editingBinding.channel,
+			original_guild_id: editingBinding.guild_id || undefined,
+			original_workspace_id: editingBinding.workspace_id || undefined,
+			original_chat_id: editingBinding.chat_id || undefined,
+			agent_id: bindingForm.agent_id,
+			channel: bindingForm.channel,
+		};
+
+		if (bindingForm.channel === "discord" && bindingForm.guild_id.trim()) {
+			request.guild_id = bindingForm.guild_id.trim();
+		}
+		if (bindingForm.channel === "slack" && bindingForm.workspace_id.trim()) {
+			request.workspace_id = bindingForm.workspace_id.trim();
+		}
+		if (bindingForm.channel === "telegram" && bindingForm.chat_id.trim()) {
+			request.chat_id = bindingForm.chat_id.trim();
+		}
+
+		request.channel_ids = bindingForm.channel_ids;
+		request.dm_allowed_users = bindingForm.dm_allowed_users;
+
+		updateBindingMutation.mutate(request);
+	};
+
+	const handleDeleteBinding = (binding: any) => {
+		const request: any = {
+			agent_id: binding.agent_id,
+			channel: binding.channel,
+		};
+
+		if (binding.guild_id) request.guild_id = binding.guild_id;
+		if (binding.workspace_id) request.workspace_id = binding.workspace_id;
+		if (binding.chat_id) request.chat_id = binding.chat_id;
+
+		deleteBindingMutation.mutate(request);
+	};
+
+	return (
+		<div className="mx-auto max-w-2xl px-6 py-6">
+			<div className="mb-6">
+				<h2 className="font-plex text-sm font-semibold text-ink">Conversation Bindings</h2>
+				<p className="mt-1 text-sm text-ink-dull">
+					Route conversations from messaging platforms to agents. The first matching binding wins.
+				</p>
+			</div>
+
+			{bindingsLoading ? (
+				<div className="flex items-center gap-2 text-ink-dull">
+					<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+					Loading bindings...
+				</div>
+			) : (
+				<>
+					<div className="mb-4 flex items-center justify-between">
+						<h3 className="font-plex text-sm font-medium text-ink">Active Bindings</h3>
+						<Button
+							size="sm"
+							variant="outline"
+							onClick={() => {
+								setAddingBinding(true);
+								setEditingBinding(null);
+								setBindingForm({
+									agent_id: agentsData?.agents?.[0]?.id ?? "main",
+									channel: "discord",
+									guild_id: "",
+									workspace_id: "",
+									chat_id: "",
+									channel_ids: [],
+									dm_allowed_users: [],
+								});
+								setMessage(null);
+							}}
+						>
+							Add Binding
+						</Button>
+					</div>
+
+					{bindingsData?.bindings && bindingsData.bindings.length > 0 ? (
+						<div className="rounded-lg border border-app-line bg-app-box">
+							{bindingsData.bindings.map((binding, idx) => (
+								<div
+									key={idx}
+									className="flex items-center gap-3 border-b border-app-line/50 px-4 py-3 last:border-b-0"
+								>
+									<PlatformIcon platform={binding.channel} size="1x" className="text-ink-faint" />
+									<div className="flex-1">
+										<div className="flex items-center gap-2">
+											<span className="text-sm font-medium text-ink">
+												{binding.agent_id}
+											</span>
+											<span className="text-sm text-ink-faint">→</span>
+											<span className="text-sm text-ink-dull">
+												{binding.channel}
+											</span>
+										</div>
+										<div className="mt-1 flex items-center gap-2 text-tiny text-ink-faint">
+											{binding.guild_id && (
+												<span>Guild: {binding.guild_id}</span>
+											)}
+											{binding.workspace_id && (
+												<span>Workspace: {binding.workspace_id}</span>
+											)}
+											{binding.chat_id && (
+												<span>Chat: {binding.chat_id}</span>
+											)}
+											{binding.channel_ids.length > 0 && (
+												<span>Channels: {binding.channel_ids.length}</span>
+											)}
+											{binding.dm_allowed_users.length > 0 && (
+												<span>DM Users: {binding.dm_allowed_users.length}</span>
+											)}
+										</div>
+									</div>
+									<div className="flex items-center gap-2">
+										<Button 
+											size="sm" 
+											variant="ghost"
+											onClick={() => handleEditBinding(binding)}
+										>
+											Edit
+										</Button>
+										<Button 
+											size="sm" 
+											variant="ghost"
+											onClick={() => handleDeleteBinding(binding)}
+											loading={deleteBindingMutation.isPending}
+										>
+											Remove
+										</Button>
+									</div>
+								</div>
+							))}
+						</div>
+					) : (
+						<div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-app-line/50 bg-app-darkBox/20 py-12">
+							<p className="text-sm text-ink-faint">No bindings configured</p>
+							<p className="mt-1 text-tiny text-ink-faint/70">
+								Add a binding to route messages to an agent
+							</p>
+						</div>
+					)}
+
+					{message && (
+						<div
+							className={`mt-4 rounded-md border px-3 py-2 text-sm ${
+								message.type === "success"
+									? "border-green-500/20 bg-green-500/10 text-green-400"
+									: "border-red-500/20 bg-red-500/10 text-red-400"
+							}`}
+						>
+							{message.text}
+						</div>
+					)}
+				</>
+			)}
+
+			<div className="mt-6 rounded-md border border-app-line bg-app-darkBox/20 px-4 py-3">
+				<p className="text-sm text-ink-faint">
+					Bindings match conversations to agents based on platform, server/workspace, channel, and user filters. 
+					Configure platform credentials in the <strong>Channels</strong> tab first.
+				</p>
+			</div>
+
 			<Dialog open={addingBinding || editingBinding !== null} onOpenChange={(open) => { 
 				if (!open) {
 					setAddingBinding(false);
@@ -990,7 +1039,6 @@ function ChannelsSection() {
 					</DialogHeader>
 
 					<div className="flex flex-col gap-4">
-						{/* Agent Selection */}
 						<div>
 							<label className="mb-1.5 block text-sm font-medium text-ink">Agent</label>
 							<Select
@@ -1012,7 +1060,6 @@ function ChannelsSection() {
 							</Select>
 						</div>
 
-						{/* Platform Selection */}
 						<div>
 							<label className="mb-1.5 block text-sm font-medium text-ink">Platform</label>
 							<Select
@@ -1031,7 +1078,6 @@ function ChannelsSection() {
 							</Select>
 						</div>
 
-						{/* Platform-specific filters */}
 						{bindingForm.channel === "discord" && (
 							<div>
 								<label className="mb-1.5 block text-sm font-medium text-ink">Guild ID</label>
@@ -1074,7 +1120,6 @@ function ChannelsSection() {
 							</div>
 						)}
 
-						{/* Channel IDs (for Discord/Slack) */}
 						{(bindingForm.channel === "discord" || bindingForm.channel === "slack") && (
 							<div>
 								<label className="mb-1.5 block text-sm font-medium text-ink">Channel IDs</label>
@@ -1089,7 +1134,6 @@ function ChannelsSection() {
 							</div>
 						)}
 
-						{/* DM Allowed Users */}
 						<div>
 							<label className="mb-1.5 block text-sm font-medium text-ink">DM Allowed Users</label>
 							<TagInput
