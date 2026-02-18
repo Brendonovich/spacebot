@@ -150,6 +150,12 @@ pub fn init_foreground_tracing(debug: bool) {
 pub async fn start_ipc_server(
     paths: &DaemonPaths,
 ) -> anyhow::Result<(watch::Receiver<bool>, tokio::task::JoinHandle<()>)> {
+    // Ensure the instance directory exists (e.g. on first run)
+    if let Some(parent) = paths.socket.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create instance directory: {}", parent.display()))?;
+    }
+
     // Clean up any stale socket file
     if paths.socket.exists() {
         std::fs::remove_file(&paths.socket)
